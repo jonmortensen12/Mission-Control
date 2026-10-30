@@ -56,9 +56,10 @@ function loadSave(){
     const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
     if(s && s.lv) return {credits: s.credits | 0, lv: Object.assign(MC.freshLevels(), s.lv),
                           record: +s.record || 0, runs: s.runs | 0, paint: s.paint || 'classic',
-                          bosses: s.bosses | 0, planets: Array.isArray(s.planets) ? s.planets.slice(0, 200) : []};
+                          bosses: s.bosses | 0, planets: Array.isArray(s.planets) ? s.planets.slice(0, 200) : [],
+                          theme: typeof s.theme === 'string' ? s.theme : 'liftoff'};
   } catch(e){}
-  return {credits: 0, lv: MC.freshLevels(), record: 0, runs: 0, paint: 'classic', bosses: 0, planets: []};
+  return {credits: 0, lv: MC.freshLevels(), record: 0, runs: 0, paint: 'classic', bosses: 0, planets: [], theme: 'liftoff'};
 }
 function storeSave(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch(e){} }
 let SAVE = loadSave();
@@ -196,6 +197,12 @@ function onPhone(p, d){
   } else if(d.t === 'paint'){
     const pt = MC.PAINTS.find(x => x.key === d.key);
     if(pt && unlocked(pt) && G.phase === 'hangar'){ SAVE.paint = pt.key; storeSave(); sfx('click'); }
+  } else if(d.t === 'theme'){
+    if(G.phase !== 'hangar') return;
+    if(d.key === 'off' || (MUSIC.man && MUSIC.man.themes[d.key])){
+      SAVE.theme = d.key; storeSave(); sfx('click');
+      MUSIC.preview = d.key === 'off' ? null : d.key;     // play it here, so they can hear it
+    }
   } else if(d.t === 'pause'){
     if(G.phase === 'flight'){ G.paused = !!d.v; sfx('click'); }
   } else if(d.t === 'name'){
@@ -213,7 +220,9 @@ function broadcast(){
     crew[s] = p ? {name: p.name, on: !!p.conn, ready: !!p.ready} : null;
   });
   const m = {t: 's', ph: G.phase, crew, credits: SAVE.credits, lv: SAVE.lv, record: Math.floor(SAVE.record),
-             cd: Math.ceil(G.countT), paint: SAVE.paint, paused: G.paused};
+             cd: Math.ceil(G.countT), paint: SAVE.paint, paused: G.paused, sound: soundOn(),
+             theme: SAVE.theme || 'liftoff',
+             themes: MUSIC.man ? Object.entries(MUSIC.man.themes).map(([k, t]) => ({key: k, title: t.title, blurb: t.blurb})) : []};
   if(S){
     Object.assign(m, {
       hull: Math.round(S.hull), hullMax: S.st.hullMax, E: Math.round(S.E), Emax: S.st.Emax,
@@ -241,6 +250,7 @@ function launch(){
   G.last = null;
   G.keyHeld = false;
   G.paused = false;
+  MUSIC.preview = null;
   particles.length = 0;
   Object.values(NET.people).forEach(p => { p.ready = false; });
   sfx('count');
@@ -270,6 +280,7 @@ function endRun(){
             newPaints, mvp: mvpOf(S.stats, crewNames)};
   G.phase = 'dead';
   G.deadT = 0;
+  setTimeout(() => cue(newRecord ? 'record' : 'gameover'), 1600);
 }
 
 /* Who saved the ship: the station whose work counted most this run, by a
@@ -341,7 +352,10 @@ function update(dt){
     G.countT -= dt;
     if(Math.ceil(G.countT) !== before && G.countT > 0) sfx('count');
     // idle the engines on the pad so the flame is lit at liftoff
-    if(G.countT <= 0){ G.phase = 'flight'; sfx('liftoff'); banner('LIFTOFF!', ''); }
+    if(G.countT <= 0){
+      G.phase = 'flight'; banner('LIFTOFF!', '');
+      if(cue('go')) cue('liftoff-cue', 0.8); else sfx('liftoff');
+    }
   } else if(G.phase === 'flight'){
     if(G.paused) return;
     const S = G.S;
@@ -381,7 +395,7 @@ function onEvent(e){
       sfx('alarm'); sendTo('thrusters', {t: 'fx', k: 'stage'});
       break;
     case 'staged':
-      sfx('stage'); G.shake = 10;
+      sfx('stage'); noise(0.5, 0.4, 1600); G.shake = 10;
       [-1, 1].forEach(sd => particles.push({x: e.x + sd * 36, y: SHIP_Y + 10, vx: sd * 60, vy: 120, life: 3, max: 3, booster: true, rot: 0, spin: sd * 0.8}));
       banner('STAGE SEPARATION', '');
       break;
@@ -392,7 +406,7 @@ function onEvent(e){
     case 'shot': sfx('shot'); break;
     case 'eshot': sfx('eshot'); break;
     case 'pickup':
-      sfx('pickup');
+      if(!cue(e.kind === 'battery' ? 'battery' : e.kind === 'gem' ? 'gem' : 'pickup')) sfx('pickup');
       sparks(e.x, e.y, e.kind === 'fuel' ? '#69f0ae' : e.kind === 'repair' ? '#ff8a80' : '#e1bee7', 18);
       floater(e.x, e.y - 20, {fuel: '+FUEL', repair: '+HULL', battery: 'FULL POWER!', gem: '+8 CREDITS'}[e.kind] || '');
       break;
@@ -416,7 +430,7 @@ function onEvent(e){
     case 'bossdown':
       banner('MOTHERSHIP DESTROYED!', '+40 credits');
       for(let i = 0; i < 6; i++) setTimeout(() => boom(e.x + (Math.random() - 0.5) * 160, e.y + (Math.random() - 0.5) * 80, 70, 'ship'), i * 140);
-      G.shake = 16; sfx('fanfare'); everyone({t: 'fx', k: 'win'});
+      G.shake = 16; if(!cue('victory')) sfx('fanfare'); everyone({t: 'fx', k: 'win'});
       break;
     case 'bossgone': banner('THE MOTHERSHIP ESCAPED', 'It will be back.'); break;
     case 'dead':
@@ -472,7 +486,7 @@ function audio(){
   if(AC) return AC;
   try {
     AC = new (window.AudioContext || window.webkitAudioContext)();
-    master = AC.createGain(); master.gain.value = 0.35; master.connect(AC.destination);
+    master = AC.createGain(); master.gain.value = 0.5; master.connect(AC.destination);
   } catch(e){ AC = null; }
   return AC;
 }
@@ -494,7 +508,9 @@ function noise(d, vol, freq){
   src.connect(f); f.connect(gn); gn.connect(master); src.start(t);
 }
 let shotGate = 0;
+const CUE_FOR = {count: 'count', alarm: 'alarm', stage: 'stage', sector: 'sector', fanfare: 'space'};
 function sfx(k){
+  if(CUE_FOR[k] && cue(CUE_FOR[k])) return;
   switch(k){
     case 'shot': { const n = performance.now(); if(n - shotGate < 70) return; shotGate = n; tone(880, 0.08, 'square', 0.06, 300); break; }
     case 'eshot': tone(320, 0.15, 'sawtooth', 0.05, 160); break;
@@ -522,67 +538,78 @@ function sfx(k){
   }
 }
 
-/* ---------- music: a four-chord loop, written as it plays ----------
-   Am F C G. The hangar gets a slow arpeggio; the flight adds bass and, in
-   space, drums; it speeds up the further out you are; a mothership gets
-   its own harder version. Scheduled a little ahead on the audio clock so
-   it keeps time however the page is painting. */
-const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];   // MIDI
-const midi = n => 440 * Math.pow(2, (n - 69) / 12);
-const MUSIC = {next: 0, step: 0, gain: null};
-function note(f, t, d, type, vol){
-  const o = AC.createOscillator(), gn = AC.createGain();
-  o.type = type; o.frequency.setValueAtTime(f, t);
-  gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.01);
-  gn.gain.exponentialRampToValueAtTime(0.0001, t + d);
-  o.connect(gn); gn.connect(MUSIC.gain); o.start(t); o.stop(t + d + 0.05);
+/* ---------- music: recorded instruments, rendered ahead of time ----------
+   tools/music.py renders every piece from the FluidR3 GM recordings into
+   web/music/ as MP3, with music.json saying where each loop starts and
+   ends. Three themes for the flight (the family picks one from a phone in
+   the hangar), a hangar piece, a mothership piece, and short cues for the
+   big moments. Files are fetched and decoded only once the sound is on,
+   the hangar first; anything not ready yet simply waits, and the synthesised
+   effects stand in for a cue that has not arrived. */
+const MUSIC = {man: null, bufs: {}, loading: {}, cur: null, gain: null, duckUntil: 0, preview: null};
+fetch('music/music.json').then(r => r.json()).then(m => { MUSIC.man = m; }).catch(() => {});
+function musicEntry(key){
+  const m = MUSIC.man;
+  return m && (m.themes[key] || m.loops[key] || m.cues[key]) || null;
 }
-function hat(t, vol){
-  const len = Math.floor(AC.sampleRate * 0.05), buf = AC.createBuffer(1, len, AC.sampleRate), ch = buf.getChannelData(0);
-  for(let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / len);
-  const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
-  src.buffer = buf; f.type = 'highpass'; f.frequency.value = 6000; gn.gain.value = vol;
-  src.connect(f); f.connect(gn); gn.connect(MUSIC.gain); src.start(t);
+function musicBuf(key){
+  if(MUSIC.bufs[key]) return MUSIC.bufs[key];
+  const e = musicEntry(key);
+  if(!e || !AC || AC.state !== 'running' || MUSIC.loading[key]) return null;
+  MUSIC.loading[key] = true;
+  fetch('music/' + e.file).then(r => r.arrayBuffer()).then(data =>
+    // the callback form: older Safari has no promise from decodeAudioData
+    AC.decodeAudioData(data, buf => { MUSIC.bufs[key] = buf; }, () => { MUSIC.loading[key] = false; })
+  ).catch(() => { MUSIC.loading[key] = false; });
+  return null;
 }
-function kick(t){
-  const o = AC.createOscillator(), gn = AC.createGain();
-  o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.15);
-  gn.gain.setValueAtTime(0.5, t); gn.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
-  o.connect(gn); gn.connect(MUSIC.gain); o.start(t); o.stop(t + 0.25);
-}
-function musicMode(){
-  if(G.phase === 'hangar') return 'hangar';
-  if(G.phase === 'dead' || G.paused) return 'quiet';
-  if(G.S && G.S.boss) return 'boss';
-  return G.S && G.S.alt >= SPACE_KM ? 'space' : 'climb';
+function themeKey(){ return SAVE.theme === 'off' ? null : (SAVE.theme || 'liftoff'); }
+function musicWant(){
+  if(G.phase === 'hangar') return MUSIC.preview || 'hangar';
+  if(G.phase === 'dead') return null;
+  if(G.S && G.S.boss) return themeKey() ? 'mothership' : null;
+  return themeKey();
 }
 function musicTick(){
-  if(!AC || AC.state !== 'running') return;
-  if(!MUSIC.gain){ MUSIC.gain = AC.createGain(); MUSIC.gain.gain.value = 0.55; MUSIC.gain.connect(master); }
-  const mode = musicMode();
-  const d = G.S ? MC.difficulty(G.S) : 0;
-  const bpm = mode === 'hangar' ? 84 : mode === 'boss' ? 150 : mode === 'climb' ? 104 : 112 + Math.min(24, d * 8);
-  const spb = 60 / bpm / 4;
-  if(MUSIC.next < AC.currentTime) MUSIC.next = AC.currentTime + 0.05;
-  while(MUSIC.next < AC.currentTime + 0.2){
-    const t = MUSIC.next, st = MUSIC.step % 16, ch = CHORDS[Math.floor(MUSIC.step / 16) % 4];
-    if(mode !== 'quiet'){
-      if(mode === 'hangar'){
-        if(st % 4 === 0) note(midi(ch[(st / 4) % 3] + 12), t, spb * 6, 'triangle', 0.06);
-        if(st === 0) note(midi(ch[0] - 12), t, spb * 16, 'sine', 0.08);
-      } else {
-        const arp = mode === 'boss' ? [0, 1, 2, 1] : [0, 1, 2, 1, 2, 1];
-        if(st % 2 === 0) note(midi(ch[arp[(st / 2) % arp.length]] + 12), t, spb * 1.6, mode === 'boss' ? 'sawtooth' : 'square', mode === 'boss' ? 0.035 : 0.025);
-        if(mode === 'boss' ? st % 2 === 0 : st % 4 === 0) note(midi(ch[0] - 24), t, spb * 1.8, 'sawtooth', 0.07);
-        if(mode !== 'climb'){
-          if(st % 8 === 0 || (mode === 'boss' && st % 4 === 0)) kick(t);
-          if(st % 2 === 1) hat(t, 0.05);
-        }
+  if(!AC || AC.state !== 'running' || !MUSIC.man) return;
+  if(!MUSIC.gain){ MUSIC.gain = AC.createGain(); MUSIC.gain.gain.value = 0.9; MUSIC.gain.connect(master); }
+  // fetch what is wanted soon: the hangar and the chosen theme first, then the rest
+  ['hangar', themeKey(), 'count', 'go', 'liftoff-cue', 'mothership', 'space', 'sector', 'pickup', 'battery', 'gem',
+   'stage', 'alarm', 'victory', 'gameover', 'record', 'liftoff', 'starlight', 'hyperdrive'].some(k => k && !MUSIC.bufs[k] && (musicBuf(k), true));
+  const want = musicWant(), now = AC.currentTime;
+  if((MUSIC.cur && MUSIC.cur.key) !== want){
+    const buf = want && musicBuf(want);
+    if(!want || buf){
+      if(MUSIC.cur){
+        const old = MUSIC.cur;
+        old.g.gain.setTargetAtTime(0, now, 0.4);
+        setTimeout(() => { try { old.src.stop(); } catch(e){} }, 2500);
+      }
+      MUSIC.cur = null;
+      if(buf){
+        const e = musicEntry(want), src = AC.createBufferSource(), g = AC.createGain();
+        src.buffer = buf; src.loop = true; src.loopStart = e.loopStart; src.loopEnd = e.loopEnd;
+        g.gain.setValueAtTime(0.0001, now); g.gain.setTargetAtTime(1, now, 0.5);
+        src.connect(g); g.connect(MUSIC.gain); src.start(now, e.loopStart);
+        MUSIC.cur = {key: want, src, g};
       }
     }
-    MUSIC.next += spb;
-    MUSIC.step++;
   }
+  // quieter under a cue, and while paused
+  const duck = (performance.now() < MUSIC.duckUntil ? 0.35 : 1) * (G.paused ? 0.3 : 1);
+  MUSIC.gain.gain.setTargetAtTime(0.9 * duck, now, 0.15);
+}
+/* A short recorded cue. False if it is not loaded yet, so the caller can
+   fall back to a synthesised sound. */
+function cue(key, vol){
+  if(!AC || muted || AC.state !== 'running') return false;
+  const buf = musicBuf(key);
+  if(!buf) return false;
+  const src = AC.createBufferSource(), g = AC.createGain();
+  src.buffer = buf; g.gain.value = vol == null ? 1 : vol;
+  src.connect(g); g.connect(master); src.start();
+  if(buf.duration > 2.5) MUSIC.duckUntil = Math.max(MUSIC.duckUntil, performance.now() + buf.duration * 700);
+  return true;
 }
 
 /* The engines: a low rumble that follows the throttle, louder on a boost,
@@ -606,8 +633,27 @@ function engineTick(){
   ENGINE.gn.gain.setTargetAtTime(want, AC.currentTime, 0.08);
   ENGINE.f.frequency.setTargetAtTime(200 + 500 * thr + (boost ? 600 : 0), AC.currentTime, 0.1);
 }
-function unlockAudio(){ const a = audio(); if(a && a.state === 'suspended') a.resume(); }
-addEventListener('pointerdown', unlockAudio);
+/* Browsers keep a page silent until somebody touches THAT device, and the
+   phones do not count - they are other devices. So the TV shows a prompt
+   until it has been tapped, clicked or had a key pressed, and every one of
+   those turns the sound on. On an iPad the ring/silent switch mutes web
+   audio too, unless the page says it is playing media, which it does. */
+function unlockAudio(){
+  try { if(navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
+  const a = audio();
+  if(!a) return;
+  if(a.state !== 'running'){ try { a.resume(); } catch(e){} }
+  try {
+    // iOS wants a sound started inside the touch itself
+    const b = a.createBuffer(1, 1, 22050), src = a.createBufferSource();
+    src.buffer = b; src.connect(a.destination); src.start(0);
+  } catch(e){}
+}
+// remember whether this touch found the sound off: if so, it was for the sound
+let soundTap = false;
+addEventListener('pointerdown', () => { soundTap = !soundOn(); }, true);
+['pointerdown', 'touchend', 'click', 'keydown'].forEach(ev => addEventListener(ev, unlockAudio, true));
+function soundOn(){ return !!(AC && AC.state === 'running'); }
 
 /* ---------- keyboard: for the person holding the remote ---------- */
 addEventListener('keydown', e => {
@@ -619,12 +665,14 @@ addEventListener('keydown', e => {
     else if(G.phase === 'dead' && G.deadT > 1.5) toHangar();
     e.preventDefault();
   }
-  if(e.key === 'm' || e.key === 'M'){ muted = !muted; if(master) master.gain.value = muted ? 0 : 0.35; }
+  if(e.key === 'm' || e.key === 'M'){ muted = !muted; if(master) master.gain.value = muted ? 0 : 0.5; }
   if((e.key === 'p' || e.key === 'P' || e.key === 'Escape') && G.phase === 'flight') G.paused = !G.paused;
   if(e.key === 'f' || e.key === 'F'){ try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch(err){} }
 });
 addEventListener('keyup', e => { G.keys[e.key] = false; });
 addEventListener('pointerdown', e => {
+  // the first tap on the TV is for the sound, not for launching
+  if(soundTap) return;
   if(G.phase === 'hangar' && e.clientY > innerHeight * 0.85) launch();
 });
 
@@ -670,6 +718,7 @@ function draw(el){
     if(G.phase === 'dead') drawResults();
   }
   g.restore();
+  if(!soundOn()) drawSoundPrompt();
   document.getElementById('status').textContent = NET.status || '';
 }
 
@@ -1176,6 +1225,18 @@ function drawTip(S){
   g.fillStyle = STATION_INFO[s].col; g.fillText(TIPS[s], W / 2, 180);
 }
 
+function drawSoundPrompt(){
+  // clear of the ship: low in the hangar, under the distance in flight
+  const y = G.phase === 'hangar' ? 762 : 128;
+  g.save();
+  g.fillStyle = '#ffd54f';
+  g.beginPath(); g.roundRect(W / 2 - 330, y, 660, 60, 30); g.fill();
+  g.strokeStyle = 'rgba(255,255,255,' + (0.5 + 0.5 * Math.sin(clock * 4)) + ')'; g.lineWidth = 4; g.stroke();
+  g.fillStyle = '#1a1300'; g.font = 'bold 27px system-ui'; g.textAlign = 'center';
+  g.fillText('\u{1F50A}  Tap this screen (or press a key) for sound', W / 2, y + 40);
+  g.restore();
+}
+
 function drawPause(){
   g.fillStyle = 'rgba(3,4,12,0.7)'; g.fillRect(0, 0, W, H);
   g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 110px system-ui';
@@ -1309,7 +1370,12 @@ function drawHangar(){
     g.textAlign = 'left'; g.font = '15px system-ui'; g.fillStyle = '#8899aa'; g.fillText(u.blurb, rx + 14, y + 60);
   });
   g.textAlign = 'left'; g.font = '17px system-ui'; g.fillStyle = '#9fb0c3';
-  g.fillText('Buy upgrades and pick the paint from any phone.', rx, ry + 500);
+  g.fillText('Upgrades, paint and music: from any phone.', rx, ry + 500);
+  const th = MUSIC.man && MUSIC.man.themes[SAVE.theme];
+  g.fillStyle = '#e1bee7'; g.font = 'bold 18px system-ui';
+  g.fillText('\u266B Music: ' + (SAVE.theme === 'off' ? 'off' : th ? th.title : 'Liftoff'), rx, ry + 528);
+  g.fillStyle = '#5c6b80'; g.font = '13px system-ui';
+  g.fillText('Instruments: FluidR3 GM soundfont by Frank Wen (CC BY 3.0)', rx, ry + 552);
 
   // bottom: how to go
   const here = present();

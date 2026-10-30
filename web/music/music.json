@@ -1,0 +1,97 @@
+{
+ "themes": {
+  "liftoff": {
+   "file": "liftoff.mp3",
+   "loopStart": 0.3,
+   "loopEnd": 68.87142857142857,
+   "bpm": 112,
+   "title": "Liftoff",
+   "blurb": "Heroic brass and a marching snare"
+  },
+  "starlight": {
+   "file": "starlight.mp3",
+   "loopStart": 0.3,
+   "loopEnd": 65.75453514739229,
+   "bpm": 88,
+   "title": "Starlight",
+   "blurb": "Celesta, harp and flute - wonder"
+  },
+  "hyperdrive": {
+   "file": "hyperdrive.mp3",
+   "loopStart": 0.3,
+   "loopEnd": 58.481814058956914,
+   "bpm": 132,
+   "title": "Hyperdrive",
+   "blurb": "Driving strings, taiko and horns"
+  }
+ },
+ "loops": {
+  "hangar": {
+   "file": "hangar.mp3",
+   "loopStart": 0.3,
+   "loopEnd": 50.82632653061224,
+   "bpm": 76
+  },
+  "mothership": {
+   "file": "mothership.mp3",
+   "loopStart": 0.3,
+   "loopEnd": 40.3,
+   "bpm": 144
+  }
+ },
+ "cues": {
+  "liftoff-cue": {
+   "file": "liftoff-cue.mp3",
+   "len": 4.6
+  },
+  "space": {
+   "file": "space.mp3",
+   "len": 7.0
+  },
+  "sector": {
+   "file": "sector.mp3",
+   "len": 4.38
+  },
+  "victory": {
+   "file": "victory.mp3",
+   "len": 6.2
+  },
+  "gameover": {
+   "file": "gameover.mp3",
+   "len": 8.2
+  },
+  "record": {
+   "file": "record.mp3",
+   "len": 5.83
+  },
+  "pickup": {
+   "file": "pickup.mp3",
+   "len": 2.41
+  },
+  "battery": {
+   "file": "battery.mp3",
+   "len": 2.1
+  },
+  "gem": {
+   "file": "gem.mp3",
+   "len": 1.97
+  },
+  "count": {
+   "file": "count.mp3",
+   "len": 2.41
+  },
+  "go": {
+   "file": "go.mp3",
+   "len": 2.76
+  },
+  "stage": {
+   "file": "stage.mp3",
+   "len": 2.79
+  },
+  "alarm": {
+   "file": "alarm.mp3",
+   "len": 2.75
+  }
+ },
+ "credit": "Instruments: FluidR3 GM soundfont by Frank Wen (CC BY 3.0)"
+}

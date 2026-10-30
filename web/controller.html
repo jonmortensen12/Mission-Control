@@ -52,6 +52,11 @@
   .paint i { display:block; height:26px; border-radius:6px; margin-bottom:4px; }
   .paint.on { border-color:#fff; }
   .paint:disabled { opacity:.4; }
+  .themes { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .theme { background:var(--panel); border:2px solid transparent; border-radius:12px; padding:10px 12px; text-align:left; }
+  .theme b { display:block; font-size:16px; }
+  .theme span { color:var(--dim); font-size:13px; }
+  .theme.on { border-color:#e1bee7; background:#1c1838; }
   .sideBtn.flare { background:#ff3d00 !important; color:#fff; border-color:#ffab40; animation: blink .25s steps(2) infinite; }
   @keyframes blink { 50% { opacity:.55; } }
   #flareMsg { text-align:center; color:#ff6e40; font-weight:900; font-size:20px; min-height:1.3em; letter-spacing:1px; }
@@ -186,6 +191,8 @@
       <div class="seats" id="seats"></div>
       <h2>PAINT <span style="font-weight:400">- unlocked by the family record</span></h2>
       <div class="paints" id="paints"></div>
+      <h2>MUSIC <span style="font-weight:400">- tap one to hear it on the TV</span></h2>
+      <div class="themes" id="themes"></div>
       <h2>UPGRADES <span id="credits"></span></h2>
       <div class="shop" id="shop"></div>
       <button id="readyBtn">READY</button>
@@ -475,7 +482,27 @@ function buildPaints(){
     box.appendChild(b);
   });
 }
+let themesBuilt = '';
+function paintThemes(){
+  const list = (S.themes || []).concat([{key: 'off', title: 'Off', blurb: 'Sound effects only'}]);
+  const sig = list.map(t => t.key).join();
+  if(sig !== themesBuilt){
+    themesBuilt = sig;
+    const box = $('themes');
+    box.innerHTML = '';
+    list.forEach(t => {
+      const b = document.createElement('button');
+      b.className = 'theme'; b.dataset.k = t.key;
+      b.innerHTML = '<b></b><span></span>';
+      b.firstChild.textContent = '\u266B ' + t.title; b.lastChild.textContent = t.blurb;
+      b.addEventListener('click', () => { tx({t:'theme', key: t.key}); buzz(10); });
+      box.appendChild(b);
+    });
+  }
+  document.querySelectorAll('.theme').forEach(b => b.classList.toggle('on', b.dataset.k === S.theme));
+}
 function paintHangar(){
+  paintThemes();
   if(!$('seats').children.length) buildSeats();
   if(!$('shop').children.length) buildShop();
   if(!$('paints').children.length) buildPaints();

@@ -9,3 +9,6 @@ Open `index.html` on the TV, scan the QR code with each phone, tap READY.
 
 See `HANDOFF.md` for how it works and `CLAUDE.md` for the checks to run
 before shipping.
+
+Music and cues are rendered from the FluidR3 GM soundfont by Frank Wen
+(CC BY 3.0) with `tools/music.py`.

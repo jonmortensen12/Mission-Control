@@ -18,7 +18,8 @@ const require = createRequire(import.meta.url);
 const {chromium} = require('playwright');
 
 const ROOT = path.resolve('web');
-const TYPES = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png'};
+const TYPES = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png',
+               '.mp3': 'audio/mpeg', '.json': 'application/json'};
 const server = http.createServer((req, res) => {
   const p = path.join(ROOT, decodeURIComponent(req.url.split('?')[0].split('#')[0]).replace(/\/$/, '/index.html'));
   if(!p.startsWith(ROOT) || !fs.existsSync(p)){ res.writeHead(404); res.end(); return; }
@@ -78,11 +79,23 @@ try {
   await sleep(300);
   ok(await tv.evaluate(() => NET.people[G.crew.pilot].name === 'Ana'), 'a held seat cannot be taken');
 
+  // sound: off until the TV itself is touched, and that touch launches nothing
+  ok(await tv.evaluate(() => !soundOn()), 'the TV starts silent, and says to tap it');
+  await tv.mouse.click(640, 700);
+  ok(await until(() => tv.evaluate(() => soundOn())), 'a tap on the TV turns the sound on');
+  ok(await tv.evaluate(() => G.phase === 'hangar'), 'and does not launch the ship');
+  ok(await until(() => tv.evaluate(() => MUSIC.cur && MUSIC.cur.key === 'hangar'), 15000), 'the hangar music plays');
+  ok(await until(() => phones[1].evaluate(() => document.querySelectorAll('.theme').length === 4)), 'phones offer three themes and Off');
+  await phones[1].click('.theme[data-k="starlight"]');
+  ok(await until(() => tv.evaluate(() => SAVE.theme === 'starlight' && MUSIC.preview === 'starlight')), 'a phone picks Starlight');
+  ok(await until(() => tv.evaluate(() => MUSIC.cur && MUSIC.cur.key === 'starlight'), 15000), 'and the TV plays it so everyone hears it');
+
   // the shop starts empty; ready up
   for(const p of phones) await p.click('#readyBtn');
   ok(await until(() => tv.evaluate(() => G.phase === 'count' || G.phase === 'flight')), 'everyone READY starts the countdown');
   ok(await until(() => tv.evaluate(() => G.phase === 'flight'), 6000), 'and then the flight');
   ok(await until(() => phones[0].evaluate(() => $('pilot').classList.contains('on'))), 'the pilot sees the stick');
+  ok(await until(() => tv.evaluate(() => MUSIC.cur && MUSIC.cur.key === 'starlight'), 15000), 'the flight plays the chosen theme');
 
   // keep the ship alive while we poke at it
   await tv.evaluate(() => { G.S.hull = 1e6; });
@@ -172,6 +185,7 @@ try {
   const cr0 = await tv.evaluate(() => SAVE.credits);
   await tv.evaluate(() => { G.S.hull = 1; G.S.ebolts.push({x: G.S.x, y: MC.SHIP_Y - 10, vx: 0, vy: 300, dmg: 999, life: 1}); G.S.side = 'B'; });
   ok(await until(() => tv.evaluate(() => G.phase === 'dead')), 'the ship is destroyed');
+  ok(await until(() => tv.evaluate(() => !MUSIC.cur)), 'the music stops for the results');
   ok(await until(() => P.evaluate(() => $('results').classList.contains('on') && /km/.test($('rKm').textContent))), 'the phones show the results');
   ok(await tv.evaluate(cr0 => SAVE.credits === cr0 + G.last.earned && SAVE.runs === 1, cr0), 'the run is banked');
   await sleep(2200);

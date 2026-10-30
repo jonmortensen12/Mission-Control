@@ -42,7 +42,11 @@ the computer holds by tapping it in the hangar (or mid-flight).
 
 - **Pilot** — a floating stick: wherever the thumb lands is centre, a short
   drag is full lock. Dodges, and collects pickups (green fuel, red repair,
-  pink gems worth 8 credits).
+  pink gems worth 8 credits). **Shares the engines with Thrusters**
+  (asked for): steering burns the same fuel and adds to the same engine
+  heat, in proportion to how hard the ship is swung, so a wild pilot can
+  stall the engines and a hot engine is a reason to fly smooth. The
+  pilot's phone shows both gauges. Stalled or dry, steering is weak.
 - **Shields** — which side the shield faces (front/right/back/left), and the
   power split. The reactor has `6 + reactor level` pips shared between
   shields (regen), lasers (cooling; zero pips means no firing) and engines
@@ -65,9 +69,22 @@ absorbs it.
 ## The run
 
 - **Countdown**, then liftoff from a pad with a tower.
-- **Atmosphere, 0–100 km**: birds, planes crossing, weather balloons, then
-  junk near the top. Gravity fades with height. Zone banners: Clouds,
-  Stratosphere, Mesosphere, SPACE!
+- **Atmosphere, 0–100 km** — asked for: "longer and a bit more difficult,
+  turbulence or the boosters being more important (overheat and you fall
+  back to the earth)". About 75 s for a fresh ship (was 28): drawn at 110 px
+  a kilometre where space is 50 (`altPx` maps altitude to scroll for the
+  TV). Gravity `40 + 120 × (1 − alt/100)`: at the pad the engines need ~45%
+  just to hover, so a stall low down falls back to Earth, which ends the
+  run; thick air heats the engines above 60% throttle. Hazards: geese in Vs,
+  planes, balloons, junk near the top, thunderclouds (3–20 km: not solid,
+  but lightning hits anything within reach, from the cloud's side, so the
+  shield can take it), gusts every 1.5–4 s and the jet stream (8–14 km, a
+  steady push right). **Max-Q** (10–26 km): faster than 175 px/s there
+  costs hull, with a gauge on the TV and a warning on the thrusters phone —
+  it bites once the engines are upgraded. **Staging** at 45 km: the booster
+  runs dry, the ship is at half thrust until the thrusters officer hits
+  STAGE (only that phone can). The computer stages after 1.8 s. Zone
+  banners: Clouds, Stratosphere, Mesosphere, SPACE!
 - **Space, 100 km on**: a new sector every 400 km. Sector 1 is always Low
   Orbit. After that the theme is drawn from belt (rocks), patrol (aliens),
   flyby (a named planet whose gravity pulls the ship sideways), ion storm
@@ -114,13 +131,55 @@ absorbs it.
 
 ## Sound
 
-All synthesised on the TV, no files. Effects in `sfx()`; music in
-`musicTick()` — Am F C G, scheduled ahead on the audio clock: a slow
-arpeggio in the hangar, bass in the climb, drums in space, faster the
-further out, a harder version for a mothership, silent when paused or
-dead. The engine rumble follows the throttle, roars on a boost, stops on a
-stall and thins out in vacuum. The browser needs one key press or click on
-the TV before any of it plays.
+**Turning it on.** A browser keeps a page silent until somebody touches
+*that device* — the phones are other devices and do not count. Reported
+from a tablet as "no sound at all". The TV now shows a yellow "tap this
+screen (or press a key) for sound" pill until it has had a tap, click or
+key, and that first tap only turns the sound on (it never launches:
+`soundTap` remembers the sound was off when the touch began, because in
+Chrome the context is already running by the time the launch handler
+sees the same touch). iPads mute web audio with the ring/silent switch
+unless the page says it plays media: `navigator.audioSession.type =
+'playback'`, plus a one-sample buffer started inside the touch.
+
+**Music: recorded instruments, rendered offline** (asked for: "the real
+instruments like we have in the fishing game"). The same FluidR3 GM
+recordings Dry Fly uses (Frank Wen, CC BY 3.0 — credited on the hangar
+screen and in README). `python3 tools/samples.py` fetches them into
+`tools/samples/` (git-ignored, ~40 MB); `python3 tools/music.py [name]`
+renders every piece from the notes written out in that file, through a
+hall reverb, into `web/music/*.mp3` and `music.json` (~5 MB in all).
+
+- MP3, not Dry Fly's Opus: an iPad's Safari will not play Ogg.
+- Loops are seamless by construction: the reverb tail past the last bar is
+  folded onto the start, and the file carries 0.3 s of wrap either side, so
+  `loopStart`/`loopEnd` sit inside periodic audio whatever a decoder does
+  with the first few milliseconds of an MP3.
+- The cymbal is FluidR3's reverse cymbal played forwards; the snare is
+  synthesised and band-limited (white noise read as hiss).
+- Held notes are carried past the 3 s recordings by crossfading repeats of
+  their middle. The recordings' own vibrato swings their level about 3×;
+  the looping adds nothing to that.
+
+Pieces: three flight themes the family chooses between from any phone in
+the hangar — **Liftoff** (heroic brass and a march snare, C major, 112
+bpm, 69 s loop), **Starlight** (celesta, harp, flute, choir, D Lydian, 88
+bpm, 66 s), **Hyperdrive** (driving strings, taiko, low brass, D minor,
+132 bpm, 58 s) — or Off. Plus **hangar** (piano and strings, 51 s) and
+**mothership** (the boss, E minor, 144 bpm, 40 s). Choosing a theme plays
+it on the TV straight away so everyone hears it. Cues: `go` and
+`liftoff-cue` at liftoff, `count`, `space` (the Karman line), `sector`,
+`victory` (mothership down), `gameover` / `record` on the results,
+`pickup` / `battery` / `gem`, `stage`, `alarm`.
+
+**In the game** (`MUSIC`, `musicTick`, `cue`): files are fetched and
+decoded only once the sound is on, one at a time, the hangar and the chosen
+theme first. A cue not loaded yet falls back to the synthesised effect
+(`sfx`). Music crossfades between hangar, theme and mothership, ducks to
+35% under a long cue and to 30% while paused, and stops for the results.
+Lasers, hits, explosions, the engine rumble (follows the throttle, roars on
+a boost, stops on a stall, thins in vacuum), wind and thunder stay
+synthesised.
 
 ## Tuning (as of the first build)
 
@@ -189,8 +248,12 @@ thrusters phone cannot move the shield.
 - **Not tried on a real phone, TV or Fire Stick.** Everything is verified
   headless only. The first family playtest is the real test of whether
   each station is fun to hold.
-- **Sound is on the TV only and needs one key press or click first**
-  (browser autoplay rules). No music.
+- **Sound is on the TV only and needs one tap on the TV first** (browser
+  rules; the TV says so). Phones only vibrate.
+- **Events from between ticks used to vanish.** A shield turn or a boost
+  sent by a phone emitted its event, and the next tick wiped `S.events`
+  before the TV read it, so those never made a sound. `emit` now queues
+  anything raised outside a tick (`S.queued`) into the next one.
 - **Open question from the plan:** if Thrusters turns out to be the boring
   seat in playtesting, the fallback is an Engineer station (repairs, fires,
   rerouting power).

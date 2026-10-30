@@ -25,6 +25,7 @@ the repo root.
 node simcheck.mjs    # the simulation, headless: tuning, mothership, flares, shields, power, seats, shop
 node netcheck.mjs    # the TV and five phones in Chromium, over ?local=1
 node tools/art.mjs   # redraw the icons and link preview after changing how the ship looks
+python3 tools/samples.py && python3 tools/music.py   # re-render web/music/ after changing a piece
 ```
 
 `web/sim.js` decides everything that happens and draws nothing. Change the
