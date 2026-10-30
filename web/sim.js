@@ -39,7 +39,7 @@ var COSTS = [80, 180, 340, 560, 850];
 var PAINTS = [
   {key: 'classic',  name: 'Classic',  km: 0,    body: ['#90a4ae', '#eceff1', '#78909c'], fin: '#c62828'},
   {key: 'midnight', name: 'Midnight', km: 500,  body: ['#1a237e', '#5c6bc0', '#0d1442'], fin: '#ffd54f'},
-  {key: 'tiger',    name: 'Tiger',    km: 1000, body: ['#e65100', '#ffb74d', '#bf360c'], fin: '#212121'},
+  {key: 'tiger',    name: 'Tiger',    km: 1000, body: ['#e65100', '#ffb74d', '#bf360c'], fin: '#fff8e1'},
   {key: 'mint',     name: 'Mint',     km: 1500, body: ['#00897b', '#a7ffeb', '#00695c'], fin: '#f06292'},
   {key: 'gold',     name: 'Gold',     km: 2500, body: ['#b8860b', '#fff176', '#8d6e00'], fin: '#6d4c41'},
   {key: 'ghost',    name: 'Ghost',    km: 4000, body: ['#cfd8dc', '#ffffff', '#b0bec5'], fin: '#7c4dff'}
@@ -245,7 +245,7 @@ function asteroid(S, x, y, r, vx, vy, d){
 function spawnBoss(S, name){
   var d = difficulty(S);
   S.boss = spawnObj(S, {kind: 'mother', name: name, x: W / 2, y: -160, r: 92, ride: 0,
-    hp: Math.round(70 * (1 + 0.45 * d)), dmg: 45, hostile: true, alien: true, cr: 80,
+    hp: Math.round(300 * (1 + 0.45 * d)), dmg: 45, hostile: true, alien: true, cr: 80,
     volley: 3, launch: 5, torp: 7, leave: 70, boss: true});
   emit(S, 'boss', {name: name});
 }
@@ -529,7 +529,7 @@ function step(S, inp, dt){
       else if(!o.dashing){ o.dashing = true; o.vx = dx / dl * (420 + 40 * d); o.vy = dy / dl * (420 + 40 * d); }
       o.x += o.vx * dt; o.y += o.vy * dt;
     } else if(o.kind === 'mother'){
-      o.y += (150 - o.y) * 0.8 * dt;
+      o.y += (215 - o.y) * 0.8 * dt;
       o.x = W / 2 + Math.sin(o.t * 0.35) * 480;
       o.leave -= dt;
       if(o.leave <= 0){ o.y -= 0; o.dead = true; S.boss = null; emit(S, 'bossgone', {name: o.name}); continue; }

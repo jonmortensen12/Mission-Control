@@ -6,6 +6,8 @@
 <meta name="theme-color" content="#060a18">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Mission Control - Station</title>
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root { --bg:#060a18; --panel:#0f1830; --line:#22304f; --ink:#e8eef8; --dim:#8a9ab3; --col:#4dd0e1; }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
@@ -66,6 +68,8 @@
   /* hangar */
   #hangar { flex-direction:column; overflow-y:auto; touch-action:pan-y; padding-bottom:84px; }
   #hangar h2 { margin:6px 0 2px; font-size:15px; color:var(--dim); letter-spacing:1px; }
+  /* a scrolling column: nothing in it may shrink, or the paint row folds to nothing */
+  #hangar > * { flex:0 0 auto; }
   .seats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
   .seat { background:var(--panel); border:2px solid transparent; border-radius:12px; padding:10px 12px; text-align:left; min-height:72px; }
   .seat b { display:block; font-size:17px; letter-spacing:1px; }

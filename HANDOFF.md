@@ -19,13 +19,16 @@ go, phones as controllers the way Family Beatdown does it.
 | `web/sim.js` | The simulation. Pure, deterministic, no drawing. Loaded by both pages and by `simcheck`. |
 | `web/net.js` | The connection: PeerJS (WebRTC) normally, BroadcastChannel with `?local=1`. |
 | `web/qr.js` | QR encoder, copied from Family Beatdown so the join code needs no CDN. |
+| `web/manifest.webmanifest`, `icon-*.png`, `og.png` | Install icon and link preview. Drawn by `tools/art.mjs` from the game's own renderer — rerun it after changing how the ship looks. |
+| `worker.js` | Serves `/relay` (Cloudflare TURN passes); everything else is a plain file from `web/`. |
 | `simcheck.mjs` | Headless simulation checks and tuning bounds. |
 | `netcheck.mjs` | The TV and five phones in Chromium, end to end. |
 
 ## Playing it without phones
 
 - `index.html` and press **Enter**: the computer crews every station; arrow
-  keys (or A/D) steer once pressed. **M** mutes, **F** fullscreen.
+  keys (or A/D) steer once pressed. **P** pauses, **M** mutes, **F**
+  fullscreen.
 - `index.html?local=1` plus `controller.html?local=1#CODE` in other tabs of
   the same browser: real phone pages, no internet. This is what `netcheck`
   drives, and the quickest way to try a station change on a laptop.
@@ -75,15 +78,56 @@ absorbs it.
   bursts), rammers from d 1.3 (lock on, flash, then dash — from the sides),
   chasers from d 1.9 (come up from behind). Rock size, hit points, damage,
   fire rate and spawn rate all scale with d.
+- **Every third sector is a mothership** (3, 6, 9...). It parks across the
+  top, sweeps side to side, fires fans of five shots, launches scouts and
+  sends slow homing torpedoes the gunner has to shoot down; below 40% it
+  turns red and attacks faster. The sector does not end while it lives. It
+  leaves after seventy seconds if it is not destroyed; destroyed, it is
+  worth 40 credits. Hit points `300 × (1 + 0.45d)`. With a computer crew:
+  a fresh ship rarely gets that far (~900 km); lasers at 2 meet it and
+  watch it leave; lasers at 3 win about half the time with seconds to
+  spare; a maxed ship wins in 30–65 s. It is the first goal the upgrades
+  are for, and the gunner's big moment.
+- **Solar flares**, every 35–60 s in space (sooner further out, never during
+  a mothership): three seconds of warning from one side — a red edge, an
+  arrow and a countdown on the TV, the matching button flashing on the
+  shields phone, "tell shields" on everybody else's — then a 2.4 s burn
+  that only the shield facing it stops. The computer shields officer gets
+  there after 1.6 s.
+- **Pickups**: green fuel, red repair, blue battery (full shield, cool
+  lasers, cooler engines), pink gem (8 credits).
 - **Death**: results screen with distance, cause, record, credits, and one
-  line per station saying what that person did.
+  line per station saying what that person did, a star on whoever "saved
+  the ship" (`mvpOf`: a rough exchange rate between pickups, damage blocked,
+  kills and boosts), and any paint job the run unlocked.
+
+## Between runs
+
+- **Hangar** (lobby and shop on one screen): QR, crew, the ship as it is now,
+  the five upgrade tracks. Any phone buys; credits are shared.
+- **Paint jobs** unlock at family-record milestones (500, 1000, 1500, 2500,
+  4000 km), picked from any phone. Cosmetic only.
+- **The save** (TV `localStorage`, `mctl_save`): credits, levels, record,
+  launches, paint, motherships destroyed, planets visited.
+- **First three launches**: the TV rotates a one-line tip per occupied
+  station while the ship is in the atmosphere.
+
+## Sound
+
+All synthesised on the TV, no files. Effects in `sfx()`; music in
+`musicTick()` — Am F C G, scheduled ahead on the audio clock: a slow
+arpeggio in the hangar, bass in the climb, drums in space, faster the
+further out, a harder version for a mothership, silent when paused or
+dead. The engine rumble follows the throttle, roars on a boost, stops on a
+stall and thins out in vacuum. The browser needs one key press or click on
+the TV before any of it plays.
 
 ## Tuning (as of the first build)
 
 `node simcheck.mjs` prints these; they are also its pass bounds.
 
 - Fresh ship, computer crew: ~800 km mean, ~3 minutes, ~170 credits.
-- Fully upgraded, computer crew: ~1650 km.
+- Fully upgraded, computer crew: ~1900 km, with the first mothership down.
 - Upgrade costs `COSTS = [80, 180, 340, 560, 850]` per level, five levels
   each across five tracks: about 10,000 credits to max everything, so
   roughly 25–50 runs. Credits are `km/10 + half the kill bounty + 8 per gem`.
@@ -96,11 +140,12 @@ starting point to retune after a family playtest, not a finished balance.
 Phone → TV: `hello {name, dev, proto}`, `in {px | thr | ga, gf}` (the
 station's continuous controls, sent the moment they change and re-sent
 every 150 ms), `act {a: side | boost | pip}`, `pick {st}`, `buy {key}`,
-`ready {v}`, `ping` (a seatless phone, once a second).
+`paint {key}`, `pause {v}`, `ready {v}`, `ping` (a seatless phone, once a
+second).
 
 TV → phone: `host {proto, min}`, `you {st}`, `s {...}` (the ship's state,
-ten times a second), `fx {k: hit | block | stall | gunhot | dead}` for
-vibration.
+ten times a second, including `flare`, `boss`, `paused`, `paint`), `fx {k:
+hit | block | stall | gunhot | dead | flare | boss | win}` for vibration.
 
 A phone below the TV's `min` reloads itself. Bump both `PROTO`s and
 `PROTO_MIN` together when a message changes shape.
@@ -128,12 +173,19 @@ thrusters phone cannot move the shield.
 
 ## Not built yet
 
-- **No relay (TURN).** Same as early Family Beatdown: a guest network, a
-  router that keeps devices apart, or a phone on mobile data will fail to
-  connect. Family Beatdown's fix is `/demo?relay=1` in its Worker handing
-  out Cloudflare TURN credentials (`relay.js`); port that when there is a
-  Worker.
-- **No licence gate, no landing page, no trailer.** Step 6 of the plan.
+- **The relay is built but off.** `worker.js` serves `/relay` (Family
+  Beatdown's `relayPass`, ported); `net.js` asks it, keeps the pass in
+  `mctl_relay` and never waits more than 2.5 s for it. It needs the two
+  TURN secrets set on the Worker (`TURN_KEY_ID`, `TURN_KEY_API_TOKEN` — the
+  same TURN key Family Beatdown uses will do). Until then a guest network,
+  a router that keeps devices apart, or a phone on mobile data cannot
+  join. Open `/relay` in a browser to see what a phone is given; `why`
+  says what is wrong when it is null.
+- **No licence gate.** It needs a Polar product (and its licence-key
+  benefit id) to exist first; then port Family Beatdown's gate from its
+  `worker.js` and `gatecheck.mjs`. Until then the game is free to whoever
+  has the URL.
+- **No trailer.** Family Beatdown's `VIDEO.md` approach would carry over.
 - **Not tried on a real phone, TV or Fire Stick.** Everything is verified
   headless only. The first family playtest is the real test of whether
   each station is fun to hold.
