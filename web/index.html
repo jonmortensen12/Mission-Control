@@ -1,0 +1,989 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Mission Control</title>
+<meta name="description" content="Fly a rocket into space together. Everyone's phone is a station on the bridge.">
+<style>
+  html, body { margin: 0; height: 100%; background: #03040a; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; background: #03040a; }
+  #status { position: fixed; left: 8px; bottom: 6px; color: #5c6b80; font: 12px system-ui, sans-serif; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="cv" width="1600" height="900"></canvas>
+<div id="status"></div>
+<script src="sim.js"></script>
+<script src="qr.js"></script>
+<script src="net.js"></script>
+<script>
+'use strict';
+/* Mission Control - the television.
+
+   This page is the host. It runs the simulation (sim.js), draws it, plays
+   the sounds, and owns the room the phones join (net.js). The phones send
+   what their station is doing; this page decides what happens and tells
+   them, ten times a second, what to show.
+
+   Phases: hangar (the lobby and the upgrade shop, one screen) -> count ->
+   flight -> dead (the results) -> hangar. */
+
+const PROTO = 1, PROTO_MIN = 1;
+const {W, H, SHIP_Y, PX_PER_KM, SPACE_KM, STATIONS} = MC;
+const cv = document.getElementById('cv'), g = cv.getContext('2d');
+const STATION_INFO = {
+  pilot:     {name: 'Pilot',     col: '#ffd54f', job: 'Steers the ship'},
+  shields:   {name: 'Shields',   col: '#4dd0e1', job: 'Shields and the power split'},
+  gunner:    {name: 'Gunner',    col: '#ff6e6e', job: 'Aims and fires the lasers'},
+  thrusters: {name: 'Thrusters', col: '#69f0ae', job: 'Throttle, boost, heat and fuel'}
+};
+
+/* ---------- the save: credits, upgrades, the family record ---------- */
+const SAVE_KEY = 'mctl_save';
+function loadSave(){
+  try {
+    const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
+    if(s && s.lv) return {credits: s.credits | 0, lv: Object.assign(MC.freshLevels(), s.lv),
+                          record: +s.record || 0, runs: s.runs | 0};
+  } catch(e){}
+  return {credits: 0, lv: MC.freshLevels(), record: 0, runs: 0};
+}
+function storeSave(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch(e){} }
+let SAVE = loadSave();
+
+/* ---------- the game state around a run ---------- */
+const G = {
+  phase: 'hangar',
+  S: null,               // the run, while there is one
+  countT: 0,
+  deadT: 0,
+  last: null,            // the results of the run that just ended
+  crew: {pilot: null, shields: null, gunner: null, thrusters: null},   // station -> person id
+  keys: {},
+  shake: 0,
+  banner: null,          // {text, sub, t}
+  flash: 0
+};
+
+/* ---------- the room ---------- */
+const NET = {code: null, handle: null, status: 'Opening the room...', people: {}};
+// people: id (the phone's own device id) -> {id, name, conn, ready, inp, seen, gone}
+
+function controllerUrl(){
+  const base = location.href.split('#')[0].split('?')[0].replace(/[^/]*$/, '');
+  return base + 'controller.html' + (MCNet.isLocal() ? '?local=1' : '') + '#' + NET.code;
+}
+
+function openRoom(){
+  NET.status = 'Opening the room...';
+  NET.handle = MCNet.host({
+    open: code => { NET.code = code; NET.status = ''; qrCache = null; },
+    conn: c => wireConn(c),
+    error: msg => {
+      NET.status = msg + ' Retrying...';
+      NET.code = null;
+      setTimeout(() => { if(!NET.code) openRoom(); }, 4000);
+    }
+  });
+}
+
+function wireConn(c){
+  let id = null;
+  c.on('data', d => {
+    if(!d || typeof d !== 'object') return;
+    if(d.t === 'hello'){
+      id = String(d.dev || c.peer).slice(0, 40);
+      const old = NET.people[id];
+      if(old && old.conn && old.conn !== c){ try { old.conn.close(); } catch(e){} }
+      const p = old || {id, ready: false, inp: {}, seen: 0};
+      p.name = cleanName(d.name) || p.name || 'Crew';
+      p.conn = c; p.lastConn = c; p.gone = 0; p.seen = performance.now();
+      NET.people[id] = p;
+      send(p, {t: 'host', proto: PROTO, min: PROTO_MIN});
+      reassign();
+      return;
+    }
+    const p = id && NET.people[id];
+    if(!p) return;
+    // a phone we gave up on for going quiet, talking again on the same line
+    if(!p.conn && p.lastConn === c){ p.conn = c; p.gone = 0; reassign(); }
+    if(p.conn !== c) return;
+    p.seen = performance.now();
+    onPhone(p, d);
+  });
+  c.on('close', () => {
+    const p = id && NET.people[id];
+    if(p && p.conn === c){ p.conn = null; p.gone = performance.now(); p.ready = false; }
+  });
+}
+
+function cleanName(n){ return String(n || '').replace(/[^\p{L}\p{N} '\-]/gu, '').trim().slice(0, 14); }
+function send(p, m){ if(p && p.conn){ try { p.conn.send(m); } catch(e){} } }
+function everyone(m){ Object.values(NET.people).forEach(p => send(p, m)); }
+function present(){ return Object.values(NET.people).filter(p => p.conn); }
+
+/* A phone talks at least every second or so. One that has said nothing
+   for six is treated as away - closed, locked, out of range - and the
+   computer takes its station until it speaks again; WebRTC can take far
+   longer than that to notice on its own.
+
+   Somebody away for thirty seconds has gone; their seat goes back to the
+   computer for good. Shorter than that and it is held for them - a phone
+   that locked its screen is coming straight back. */
+function sweep(){
+  const now = performance.now();
+  let changed = false;
+  Object.values(NET.people).forEach(p => {
+    if(p.conn && now - p.seen > 6000){ p.conn = null; p.gone = now; p.ready = false; }
+    if(!p.conn && now - p.gone > 30000){ delete NET.people[p.id]; changed = true; }
+  });
+  if(changed) reassign();
+}
+
+function reassign(prefer){
+  G.crew = MC.assign(G.crew, Object.keys(NET.people), prefer);
+  Object.values(NET.people).forEach(p => {
+    const st = STATIONS.find(s => G.crew[s] === p.id) || null;
+    if(p.st !== st){ p.st = st; p.inp = {}; }
+    send(p, {t: 'you', st, name: p.name});
+  });
+}
+
+function stationOf(p){ return STATIONS.find(s => G.crew[s] === p.id) || null; }
+
+function onPhone(p, d){
+  const st = stationOf(p), S = G.S;
+  if(d.t === 'in'){
+    p.inp = d;
+  } else if(d.t === 'act'){
+    if(!S || G.phase !== 'flight' || !d.a) return;
+    // a station only works its own controls
+    const a = d.a;
+    if((a.t === 'side' || a.t === 'pip') && st !== 'shields') return;
+    if(a.t === 'boost' && st !== 'thrusters') return;
+    MC.act(S, a);
+  } else if(d.t === 'pick'){
+    if(STATIONS.indexOf(d.st) < 0) return;
+    const holder = G.crew[d.st];
+    if(holder && holder !== p.id && NET.people[holder] && NET.people[holder].conn) return;
+    STATIONS.forEach(s => { if(G.crew[s] === p.id) G.crew[s] = null; });
+    G.crew[d.st] = p.id;
+    reassign();
+    sfx('click');
+  } else if(d.t === 'buy'){
+    if(G.phase !== 'hangar') return;
+    if(MC.buy(SAVE, d.key)){ storeSave(); sfx('buy'); shopFlash = {key: d.key, t: 1}; }
+    else sfx('nope');
+  } else if(d.t === 'ready'){
+    if(G.phase === 'hangar'){ p.ready = !!d.v; sfx('click'); }
+    else if(G.phase === 'dead' && G.deadT > 2) toHangar();
+  } else if(d.t === 'name'){
+    p.name = cleanName(d.name) || p.name;
+  }
+}
+
+/* What every phone is shown. Ten times a second is plenty for gauges;
+   the controls themselves never wait on it. */
+function broadcast(){
+  const S = G.S;
+  const crew = {};
+  STATIONS.forEach(s => {
+    const p = G.crew[s] && NET.people[G.crew[s]];
+    crew[s] = p ? {name: p.name, on: !!p.conn, ready: !!p.ready} : null;
+  });
+  const m = {t: 's', ph: G.phase, crew, credits: SAVE.credits, lv: SAVE.lv, record: Math.floor(SAVE.record),
+             cd: Math.ceil(G.countT)};
+  if(S){
+    Object.assign(m, {
+      hull: Math.round(S.hull), hullMax: S.st.hullMax, E: Math.round(S.E), Emax: S.st.Emax,
+      side: S.side, pips: S.pips, pipMax: S.st.pipMax, heat: Math.round(S.heat), stall: S.stall > 0,
+      fuel: Math.round(S.fuel), fuelMax: S.st.fuelMax, thr: +S.thr.toFixed(2), boost: S.boostCd > 0 ? +S.boostCd.toFixed(1) : 0,
+      gheat: Math.round(S.gun.heat), gover: S.gun.over, ga: +S.gun.a.toFixed(2),
+      km: Math.floor(S.maxAlt), v: Math.round(S.v), sector: S.sector.name,
+      ammo: S.pips.w > 0
+    });
+  }
+  if(G.last) m.last = G.last;
+  everyone(m);
+}
+
+/* ---------- running a launch ---------- */
+function launch(){
+  if(G.phase !== 'hangar') return;
+  G.S = MC.newRun((Math.random() * 4294967296) >>> 0, Object.assign({}, SAVE.lv));
+  G.phase = 'count';
+  G.countT = 3.999;
+  G.last = null;
+  G.keyHeld = false;
+  particles.length = 0;
+  Object.values(NET.people).forEach(p => { p.ready = false; });
+  sfx('count');
+}
+
+function toHangar(){
+  G.phase = 'hangar';
+  G.S = null;
+  Object.values(NET.people).forEach(p => { p.ready = false; });
+}
+
+function endRun(){
+  const S = G.S, earned = MC.credits(S);
+  const newRecord = S.maxAlt > SAVE.record;
+  const prev = SAVE.record;
+  SAVE.credits += earned;
+  SAVE.runs++;
+  if(newRecord) SAVE.record = S.maxAlt;
+  storeSave();
+  const crewNames = {};
+  STATIONS.forEach(s => { const p = G.crew[s] && NET.people[G.crew[s]]; crewNames[s] = p ? p.name : null; });
+  G.last = {km: Math.floor(S.maxAlt), earned, cause: S.cause, newRecord, prev: Math.floor(prev),
+            sector: S.sector.name, time: Math.round(S.t), stats: Object.assign({}, S.stats), crew: crewNames};
+  G.phase = 'dead';
+  G.deadT = 0;
+}
+
+/* The inputs for one tick: people where there are people, the computer
+   everywhere else. A phone that has gone quiet - backgrounded, or out of
+   range - lets go of the stick and the trigger rather than holding them. */
+function gatherInputs(dt){
+  const S = G.S, inp = {}, auto = {};
+  const now = performance.now();
+  STATIONS.forEach(s => {
+    const p = G.crew[s] && NET.people[G.crew[s]];
+    auto[s] = !(p && p.conn);
+    if(p && p.conn){
+      const i = p.inp || {}, stale = now - p.seen > 1500;
+      if(s === 'pilot') inp.px = stale ? 0 : +i.px || 0;
+      if(s === 'thrusters' && i.thr != null) inp.thr = +i.thr;
+      if(s === 'gunner'){ if(i.ga != null) inp.ga = +i.ga; inp.gf = !stale && !!i.gf; }
+    }
+  });
+  // the keyboard flies the ship when nobody holds the pilot's seat
+  const kx = (G.keys.ArrowRight || G.keys.d ? 1 : 0) - (G.keys.ArrowLeft || G.keys.a ? 1 : 0);
+  const keyPilot = auto.pilot && (kx !== 0 || G.keyHeld);
+  if(keyPilot) auto.pilot = false, inp.px = kx;
+  const acts = MC.ai(S, auto, inp, dt);
+  acts.forEach(a => MC.act(S, a));
+  if(inp.thr == null) inp.thr = S.thr;
+  return inp;
+}
+
+/* ---------- the clock ----------
+   The simulation runs on real time at a fixed 60 steps a second, whatever
+   the screen paints at. requestAnimationFrame is a paint rate, not a
+   clock - Family Beatdown learned that from a phone in Low Power Mode. */
+const DT = 1 / 60;
+let acc = 0, lastT = performance.now(), sendT = 0;
+
+function tick(){
+  const now = performance.now();
+  let el = Math.min(0.25, (now - lastT) / 1000);
+  lastT = now;
+  acc += el;
+  while(acc >= DT){ update(DT); acc -= DT; }
+  sendT -= el;
+  if(sendT <= 0){ sendT = 0.1; broadcast(); sweep(); }
+  draw(el);
+}
+setInterval(tick, 1000 / 60);    // keeps going when the tab is hidden behind a cast
+
+function update(dt){
+  if(G.banner){ G.banner.t -= dt; if(G.banner.t <= 0) G.banner = null; }
+  G.shake = Math.max(0, G.shake - dt * 30);
+  G.flash = Math.max(0, G.flash - dt * 2.5);
+  if(shopFlash){ shopFlash.t -= dt; if(shopFlash.t <= 0) shopFlash = null; }
+  updParticles(dt);
+  if(G.phase === 'hangar'){
+    const here = present();
+    if(here.length && here.every(p => p.ready)) launch();
+  } else if(G.phase === 'count'){
+    const before = Math.ceil(G.countT);
+    G.countT -= dt;
+    if(Math.ceil(G.countT) !== before && G.countT > 0) sfx('count');
+    // idle the engines on the pad so the flame is lit at liftoff
+    if(G.countT <= 0){ G.phase = 'flight'; sfx('liftoff'); banner('LIFTOFF!', ''); }
+  } else if(G.phase === 'flight'){
+    const S = G.S;
+    const inp = gatherInputs(dt);
+    MC.step(S, inp, dt);
+    S.events.forEach(onEvent);
+    exhaust(S, dt);
+    if(S.phase === 'dead') endRun();
+  } else if(G.phase === 'dead'){
+    G.deadT += dt;
+    if(G.deadT > 14) toHangar();
+  }
+}
+
+function banner(text, sub){ G.banner = {text, sub: sub || '', t: 3.2}; }
+
+function onEvent(e){
+  const S = G.S;
+  switch(e.type){
+    case 'hit':
+      G.shake = Math.min(14, 4 + e.dmg * 0.5); G.flash = Math.max(G.flash, 0.6);
+      sfx('hit'); sparks(e.x, e.y, '#ffb74d', 14);
+      everyone({t: 'fx', k: 'hit'});
+      break;
+    case 'block':
+      sfx('block'); sparks(e.x, e.y, '#4dd0e1', 12); shieldFlash = 1;
+      sendTo('shields', {t: 'fx', k: 'block'});
+      break;
+    case 'boom': boom(e.x, e.y, e.r, e.kind); break;
+    case 'zap': sparks(e.x, e.y, '#fff59d', 4); break;
+    case 'shot': sfx('shot'); break;
+    case 'eshot': sfx('eshot'); break;
+    case 'pickup':
+      sfx('pickup');
+      sparks(e.x, e.y, e.kind === 'fuel' ? '#69f0ae' : e.kind === 'repair' ? '#ff8a80' : '#e1bee7', 18);
+      floater(e.x, e.y - 20, e.kind === 'fuel' ? '+FUEL' : e.kind === 'repair' ? '+HULL' : '+8 CREDITS');
+      break;
+    case 'stall': sfx('stall'); banner('ENGINES OVERHEATED', 'Thrusters: ease off the throttle!'); sendTo('thrusters', {t: 'fx', k: 'stall'}); break;
+    case 'restart': sfx('liftoff'); break;
+    case 'nofuel': banner('OUT OF FUEL', 'Pilot: grab a green fuel can!'); break;
+    case 'gunhot': sendTo('gunner', {t: 'fx', k: 'gunhot'}); break;
+    case 'boost': sfx('boost'); break;
+    case 'side': sfx('side'); break;
+    case 'zone': banner(e.name, e.zone === 'space' ? 'You made it to space. Now keep going.' : ''); if(e.zone === 'space') sfx('fanfare'); break;
+    case 'sector': if(e.n > 1){ banner('SECTOR ' + e.n, e.name); sfx('sector'); } else banner('SECTOR 1', e.name); break;
+    case 'dead':
+      sfx('dead'); boom(S.x, SHIP_Y, 90, 'ship'); boom(S.x - 30, SHIP_Y + 20, 60, 'ship'); G.shake = 20;
+      everyone({t: 'fx', k: 'dead'});
+      break;
+  }
+}
+function sendTo(st, m){ const p = G.crew[st] && NET.people[G.crew[st]]; send(p, m); }
+
+/* ---------- particles ---------- */
+const particles = [];
+let shieldFlash = 0, shopFlash = null;
+function sparks(x, y, col, n){
+  for(let i = 0; i < n; i++){
+    const a = Math.random() * 6.283, s = 80 + Math.random() * 320;
+    particles.push({x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.3 + Math.random() * 0.4, max: 0.7, col, r: 2 + Math.random() * 2});
+  }
+}
+function boom(x, y, r, kind){
+  sfx(r > 30 ? 'boomBig' : 'boom');
+  const n = Math.min(60, 10 + r);
+  for(let i = 0; i < n; i++){
+    const a = Math.random() * 6.283, s = 40 + Math.random() * (120 + r * 4);
+    const col = kind === 'rock' || kind === 'junk' ? (Math.random() < 0.5 ? '#9e8b7a' : '#ffcc80') :
+                (Math.random() < 0.5 ? '#ff7043' : '#ffee58');
+    particles.push({x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.4 + Math.random() * 0.6, max: 1, col, r: 2 + Math.random() * (r / 10 + 2)});
+  }
+  particles.push({x, y, ring: true, life: 0.35, max: 0.35, r: r * 1.6, col: '#fff3e0'});
+}
+function floater(x, y, text){ particles.push({x, y, vx: 0, vy: -60, life: 1.2, max: 1.2, text, col: '#fff'}); }
+function exhaust(S, dt){
+  if(S.stall > 0) return;
+  const n = S.boostT > 0 ? 3 : S.thr > 0.2 ? 1 : 0;
+  for(let i = 0; i < n; i++)
+    particles.push({x: S.x + (Math.random() - 0.5) * 14, y: SHIP_Y + 48, vx: (Math.random() - 0.5) * 40,
+                    vy: 180 + S.v * 0.6 + Math.random() * 80, life: 0.35, max: 0.35, smoke: true,
+                    col: S.boostT > 0 ? '#80d8ff' : '#ffab40', r: 4 + Math.random() * 4});
+}
+function updParticles(dt){
+  for(let i = particles.length - 1; i >= 0; i--){
+    const p = particles[i];
+    p.life -= dt;
+    if(p.life <= 0){ particles.splice(i, 1); continue; }
+    if(!p.ring){ p.x += (p.vx || 0) * dt; p.y += (p.vy || 0) * dt; if(!p.text){ p.vx *= 0.97; p.vy *= 0.97; } }
+  }
+}
+
+/* ---------- sound: a few lines of synthesis, no files ---------- */
+let AC = null, master = null, muted = false;
+function audio(){
+  if(AC) return AC;
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    master = AC.createGain(); master.gain.value = 0.35; master.connect(AC.destination);
+  } catch(e){ AC = null; }
+  return AC;
+}
+function tone(f, d, type, vol, slide){
+  if(!AC || muted || AC.state !== 'running') return;
+  const t = AC.currentTime, o = AC.createOscillator(), gn = AC.createGain();
+  o.type = type || 'square'; o.frequency.setValueAtTime(f, t);
+  if(slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, slide), t + d);
+  gn.gain.setValueAtTime(vol || 0.2, t); gn.gain.exponentialRampToValueAtTime(0.001, t + d);
+  o.connect(gn); gn.connect(master); o.start(t); o.stop(t + d + 0.02);
+}
+function noise(d, vol, freq){
+  if(!AC || muted || AC.state !== 'running') return;
+  const t = AC.currentTime, len = Math.floor(AC.sampleRate * d), buf = AC.createBuffer(1, len, AC.sampleRate);
+  const ch = buf.getChannelData(0);
+  for(let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
+  src.buffer = buf; f.type = 'lowpass'; f.frequency.value = freq || 900; gn.gain.value = vol || 0.4;
+  src.connect(f); f.connect(gn); gn.connect(master); src.start(t);
+}
+let shotGate = 0;
+function sfx(k){
+  switch(k){
+    case 'shot': { const n = performance.now(); if(n - shotGate < 70) return; shotGate = n; tone(880, 0.08, 'square', 0.06, 300); break; }
+    case 'eshot': tone(320, 0.15, 'sawtooth', 0.05, 160); break;
+    case 'hit': noise(0.25, 0.5, 600); tone(110, 0.2, 'square', 0.15, 50); break;
+    case 'block': tone(660, 0.12, 'triangle', 0.15, 990); break;
+    case 'boom': noise(0.3, 0.35, 1400); break;
+    case 'boomBig': noise(0.6, 0.6, 700); break;
+    case 'pickup': tone(660, 0.08, 'square', 0.1); setTimeout(() => tone(990, 0.12, 'square', 0.1), 70); break;
+    case 'stall': tone(220, 0.6, 'sawtooth', 0.15, 55); break;
+    case 'boost': noise(0.5, 0.35, 2500); tone(200, 0.5, 'sawtooth', 0.08, 600); break;
+    case 'side': tone(520, 0.05, 'triangle', 0.08); break;
+    case 'count': tone(440, 0.18, 'square', 0.12); break;
+    case 'liftoff': tone(880, 0.35, 'square', 0.12); noise(1.2, 0.4, 500); break;
+    case 'sector': tone(523, 0.12, 'triangle', 0.12); setTimeout(() => tone(784, 0.2, 'triangle', 0.12), 120); break;
+    case 'fanfare': [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, 0.25, 'triangle', 0.14), i * 130)); break;
+    case 'dead': noise(1.4, 0.7, 400); tone(300, 1.2, 'sawtooth', 0.12, 40); break;
+    case 'click': tone(700, 0.04, 'square', 0.06); break;
+    case 'buy': tone(784, 0.08, 'square', 0.1); setTimeout(() => tone(1175, 0.15, 'square', 0.1), 80); break;
+    case 'nope': tone(160, 0.15, 'square', 0.1); break;
+  }
+}
+function unlockAudio(){ const a = audio(); if(a && a.state === 'suspended') a.resume(); }
+addEventListener('pointerdown', unlockAudio);
+
+/* ---------- keyboard: for the person holding the remote ---------- */
+addEventListener('keydown', e => {
+  unlockAudio();
+  G.keys[e.key] = true;
+  if(e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'a' || e.key === 'd') G.keyHeld = true;
+  if(e.key === 'Enter' || e.key === ' '){
+    if(G.phase === 'hangar') launch();
+    else if(G.phase === 'dead' && G.deadT > 1.5) toHangar();
+    e.preventDefault();
+  }
+  if(e.key === 'm' || e.key === 'M') muted = !muted;
+  if(e.key === 'f' || e.key === 'F'){ try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch(err){} }
+});
+addEventListener('keyup', e => { G.keys[e.key] = false; });
+addEventListener('pointerdown', e => {
+  if(G.phase === 'hangar' && e.clientY > innerHeight * 0.85) launch();
+});
+
+/* ---------- drawing ---------- */
+function fit(){
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = Math.floor(W * s) + 'px';
+  cv.style.height = Math.floor(H * s) + 'px';
+}
+addEventListener('resize', fit);
+fit();
+
+const STARS = [];
+(function(){
+  const r = MC.mulberry(12345);
+  for(let i = 0; i < 260; i++) STARS.push({x: r() * W, y: r() * H, d: 0.05 + r() * r() * 0.5, s: r() < 0.08 ? 2 : 1, tw: r() * 6});
+})();
+
+function lerpCol(a, b, t){
+  const pa = a.match(/\w\w/g).map(h => parseInt(h, 16)), pb = b.match(/\w\w/g).map(h => parseInt(h, 16));
+  return 'rgb(' + pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(',') + ')';
+}
+function skyAt(alt){
+  const stops = [[0, '6ab8ff'], [12, '3d7fd6'], [40, '1a2a6c'], [80, '0b0f2a'], [100, '04050c']];
+  for(let i = 1; i < stops.length; i++)
+    if(alt < stops[i][0]){ const a = stops[i - 1], b = stops[i]; return lerpCol(a[1], b[1], (alt - a[0]) / (b[0] - a[0])); }
+  return '#04050c';
+}
+
+let clock = 0;
+function draw(el){
+  clock += el;
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  if(G.phase === 'hangar') drawHangar();
+  else {
+    const S = G.S;
+    if(G.shake > 0) g.translate((Math.random() - 0.5) * G.shake, (Math.random() - 0.5) * G.shake);
+    drawWorld(S);
+    drawHud(S);
+    if(G.phase === 'count') drawCount();
+    if(G.phase === 'dead') drawResults();
+  }
+  g.restore();
+  document.getElementById('status').textContent = NET.status || '';
+}
+
+function drawWorld(S){
+  const alt = S.alt, scroll = alt * PX_PER_KM;
+  g.fillStyle = skyAt(alt);
+  g.fillRect(-20, -20, W + 40, H + 40);
+  // the storm tints everything
+  if(S.sector.theme === 'storm'){ g.fillStyle = 'rgba(120,40,160,' + (0.12 + 0.05 * Math.sin(clock * 3)) + ')'; g.fillRect(0, 0, W, H); }
+  // stars, fading in with height
+  const starA = Math.max(0, Math.min(1, (alt - 30) / 60));
+  if(starA > 0){
+    STARS.forEach(s => {
+      const y = ((s.y + scroll * s.d * 0.4) % H + H) % H;
+      g.globalAlpha = starA * (0.5 + 0.5 * Math.sin(clock * 2 + s.tw));
+      g.fillStyle = '#fff';
+      g.fillRect(s.x, y, s.s, s.s);
+    });
+    g.globalAlpha = 1;
+  }
+  drawFarPlanets(S, scroll);
+  if(S.planet) drawPlanet(S.planet.x, S.planet.y, S.planet.r, S.planet.c1, S.planet.c2, S.planet.ring, S.planet.name);
+  // clouds in the low sky
+  if(alt < 30) drawClouds(scroll, alt);
+  // the ground and the launch tower
+  const groundY = SHIP_Y + 62 + scroll;
+  if(groundY < H + 200) drawGround(groundY);
+  // the family record, as a line across the sky
+  if(SAVE.record > 0){
+    const ry = SHIP_Y - (SAVE.record - alt) * PX_PER_KM;
+    if(ry > -10 && ry < H + 10){
+      g.strokeStyle = '#ffd54f'; g.setLineDash([18, 12]); g.lineWidth = 3;
+      g.beginPath(); g.moveTo(0, ry); g.lineTo(W, ry); g.stroke(); g.setLineDash([]);
+      g.fillStyle = '#ffd54f'; g.font = 'bold 22px system-ui, sans-serif'; g.textAlign = 'left';
+      g.fillText('FAMILY RECORD  ' + Math.floor(SAVE.record) + ' km', 20, ry - 10);
+    }
+  }
+  S.objs.forEach(drawObj);
+  // our bolts and theirs
+  g.lineCap = 'round';
+  S.bolts.forEach(b => {
+    g.strokeStyle = '#fff59d'; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(b.x, b.y); g.lineTo(b.x - b.vx * 0.018, b.y - b.vy * 0.018); g.stroke();
+  });
+  S.ebolts.forEach(b => {
+    g.fillStyle = '#ff4081'; g.beginPath(); g.arc(b.x, b.y, 7, 0, 6.283); g.fill();
+    g.fillStyle = '#fff'; g.beginPath(); g.arc(b.x, b.y, 3, 0, 6.283); g.fill();
+  });
+  drawParticles();
+  if(S.phase === 'flight' || G.phase === 'count') drawShip(S.x, SHIP_Y, S.lv, S, 1);
+  if(G.flash > 0){ g.fillStyle = 'rgba(255,40,40,' + (G.flash * 0.25) + ')'; g.fillRect(0, 0, W, H); }
+}
+
+const FAR = [];
+function drawFarPlanets(S, scroll){
+  // a slow parade of distant worlds once you are in space - scenery only
+  if(S.alt < SPACE_KM - 20) return;
+  const slot = Math.floor(S.alt / 260);
+  for(let k = slot - 1; k <= slot + 1; k++){
+    if(k < 0) continue;
+    const r = MC.mulberry(k * 977 + 13);
+    if(r() < 0.35) continue;
+    const startKm = k * 260, y = -300 + (S.alt - startKm) * PX_PER_KM * 0.06;
+    const cols = [['#c07a5a', '#3a1a10'], ['#6a8fd0', '#151d40'], ['#90b070', '#20301a'], ['#c8b070', '#403010'], ['#a080c0', '#2a1a40']][Math.floor(r() * 5)];
+    const x = 100 + r() * 1400, rad = 40 + r() * 110;
+    if(y - rad < H && y + rad > 0){ g.globalAlpha = 0.55; drawPlanet(x, y, rad, cols[0], cols[1], r() < 0.3); g.globalAlpha = 1; }
+  }
+}
+function drawPlanet(x, y, r, c1, c2, ring, name){
+  const gr = g.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
+  gr.addColorStop(0, c1); gr.addColorStop(1, c2);
+  if(ring){ g.strokeStyle = 'rgba(230,220,200,0.45)'; g.lineWidth = r * 0.08; g.beginPath(); g.ellipse(x, y, r * 1.7, r * 0.35, -0.3, Math.PI, 2 * Math.PI); g.stroke(); }
+  g.fillStyle = gr; g.beginPath(); g.arc(x, y, r, 0, 6.283); g.fill();
+  if(ring){ g.beginPath(); g.ellipse(x, y, r * 1.7, r * 0.35, -0.3, 0, Math.PI); g.stroke(); }
+  if(name){ g.fillStyle = 'rgba(255,255,255,0.7)'; g.font = 'bold 26px system-ui, sans-serif'; g.textAlign = 'center'; g.fillText(name.toUpperCase(), x, y + r + 40); }
+}
+function drawClouds(scroll, alt){
+  const r = MC.mulberry(777);
+  g.fillStyle = 'rgba(255,255,255,' + (0.75 * (1 - alt / 30)) + ')';
+  for(let i = 0; i < 26; i++){
+    const cx = r() * W, base = r() * 1500 + 300, sp = 0.6 + r() * 0.4;
+    const y = ((base + scroll * sp) % 1600) - 400;
+    for(let j = 0; j < 4; j++){ g.beginPath(); g.arc(cx + j * 38 - 60, y + (j % 2) * 12, 34 + (j % 3) * 10, 0, 6.283); g.fill(); }
+  }
+}
+function drawGround(y){
+  g.fillStyle = '#2e7d32'; g.fillRect(-20, y, W + 40, 400);
+  g.fillStyle = '#5d4037'; g.fillRect(W / 2 - 110, y - 8, 220, 14);
+  // the tower
+  g.strokeStyle = '#b0bec5'; g.lineWidth = 4;
+  const tx = W / 2 + 80;
+  g.strokeRect(tx, y - 200, 26, 200);
+  for(let i = 0; i < 10; i++){ g.beginPath(); g.moveTo(tx, y - i * 20); g.lineTo(tx + 26, y - i * 20 - 20); g.stroke(); }
+  g.fillStyle = '#90a4ae'; g.fillRect(tx - 30, y - 120, 34, 6);
+}
+
+function drawObj(o){
+  g.save();
+  g.translate(o.x, o.y);
+  switch(o.kind){
+    case 'rock': case 'junk': {
+      g.rotate(o.rot || 0);
+      g.fillStyle = o.kind === 'junk' ? '#78909c' : '#8d7b6a';
+      g.strokeStyle = o.kind === 'junk' ? '#cfd8dc' : '#4e4036'; g.lineWidth = 3;
+      g.beginPath();
+      o.shape.forEach((m, i) => { const a = i / o.shape.length * 6.283; const px = Math.cos(a) * o.r * m, py = Math.sin(a) * o.r * m; i ? g.lineTo(px, py) : g.moveTo(px, py); });
+      g.closePath(); g.fill(); g.stroke();
+      if(o.kind === 'rock'){ g.fillStyle = 'rgba(0,0,0,0.18)'; g.beginPath(); g.arc(o.r * 0.25, -o.r * 0.2, o.r * 0.22, 0, 6.283); g.fill(); }
+      break;
+    }
+    case 'bird': {
+      const f = Math.sin(clock * 12 + o.flap) * 8;
+      g.strokeStyle = '#263238'; g.lineWidth = 4;
+      g.beginPath(); g.moveTo(-18, f); g.quadraticCurveTo(-8, -6, 0, 0); g.quadraticCurveTo(8, -6, 18, f); g.stroke();
+      break;
+    }
+    case 'plane': {
+      g.scale(o.vx < 0 ? -1 : 1, 1);
+      g.fillStyle = '#eceff1'; g.beginPath(); g.ellipse(0, 0, 34, 9, 0, 0, 6.283); g.fill();
+      g.fillStyle = '#b0bec5'; g.beginPath(); g.moveTo(-4, 0); g.lineTo(-14, -26); g.lineTo(4, -26); g.lineTo(10, 0); g.fill();
+      g.beginPath(); g.moveTo(-30, 0); g.lineTo(-36, -14); g.lineTo(-26, -14); g.lineTo(-22, 0); g.fill();
+      g.fillStyle = '#0277bd'; g.fillRect(14, -4, 10, 4);
+      break;
+    }
+    case 'balloon': {
+      g.strokeStyle = '#90a4ae'; g.lineWidth = 2; g.beginPath(); g.moveTo(0, 20); g.lineTo(0, 44); g.stroke();
+      g.fillStyle = '#fafafa'; g.beginPath(); g.arc(0, 0, 22, 0, 6.283); g.fill();
+      g.fillStyle = '#ffcc80'; g.fillRect(-6, 42, 12, 10);
+      break;
+    }
+    case 'scout': {
+      g.fillStyle = '#7cb342'; g.beginPath(); g.ellipse(0, 4, 28, 10, 0, 0, 6.283); g.fill();
+      g.fillStyle = '#b2ff59'; g.beginPath(); g.arc(0, -2, 12, Math.PI, 0); g.fill();
+      g.fillStyle = '#ff1744'; [-16, 0, 16].forEach(x => { g.beginPath(); g.arc(x, 8, 3, 0, 6.283); g.fill(); });
+      break;
+    }
+    case 'gunship': {
+      g.fillStyle = '#6a1b9a'; g.beginPath(); g.moveTo(-50, -10); g.lineTo(50, -10); g.lineTo(30, 24); g.lineTo(-30, 24); g.closePath(); g.fill();
+      g.fillStyle = '#ce93d8'; g.beginPath(); g.arc(0, -10, 18, Math.PI, 0); g.fill();
+      g.fillStyle = '#ff1744'; g.fillRect(-36, 20, 8, 14); g.fillRect(28, 20, 8, 14);
+      break;
+    }
+    case 'rammer': {
+      const a = Math.atan2(o.vy || 1, o.vx || 0);
+      g.rotate(a - Math.PI / 2);
+      g.fillStyle = o.lock > 0 ? '#ff8a65' : '#ff3d00';
+      g.beginPath(); g.moveTo(0, 26); g.lineTo(-16, -16); g.lineTo(0, -8); g.lineTo(16, -16); g.closePath(); g.fill();
+      if(o.lock > 0 && Math.floor(clock * 10) % 2){ g.strokeStyle = '#ffeb3b'; g.lineWidth = 2; g.beginPath(); g.arc(0, 0, 30, 0, 6.283); g.stroke(); }
+      break;
+    }
+    case 'chaser': {
+      g.fillStyle = '#00897b'; g.beginPath(); g.moveTo(0, -24); g.lineTo(-18, 16); g.lineTo(18, 16); g.closePath(); g.fill();
+      g.fillStyle = '#ff1744'; g.beginPath(); g.arc(0, -4, 6, 0, 6.283); g.fill();
+      g.fillStyle = 'rgba(255,23,68,0.5)'; g.beginPath(); g.moveTo(-8, 16); g.lineTo(0, 34 + Math.random() * 10); g.lineTo(8, 16); g.fill();
+      break;
+    }
+    case 'fuel': {
+      g.fillStyle = '#00c853'; g.strokeStyle = '#b9f6ca'; g.lineWidth = 3;
+      g.beginPath(); g.roundRect(-14, -18, 28, 36, 5); g.fill(); g.stroke();
+      g.fillStyle = '#fff'; g.font = 'bold 16px system-ui'; g.textAlign = 'center'; g.fillText('F', 0, 6);
+      break;
+    }
+    case 'repair': {
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(0, 0, 20, 0, 6.283); g.fill();
+      g.fillStyle = '#e53935'; g.fillRect(-4, -13, 8, 26); g.fillRect(-13, -4, 26, 8);
+      break;
+    }
+    case 'gem': {
+      g.rotate(clock * 2);
+      g.fillStyle = '#e040fb'; g.beginPath(); g.moveTo(0, -16); g.lineTo(13, 0); g.lineTo(0, 16); g.lineTo(-13, 0); g.closePath(); g.fill();
+      g.fillStyle = '#f8bbd0'; g.beginPath(); g.moveTo(0, -16); g.lineTo(6, 0); g.lineTo(0, 4); g.closePath(); g.fill();
+      break;
+    }
+  }
+  g.restore();
+  // a damaged big thing shows how close it is
+  if(o.maxHp > 2 && o.hp < o.maxHp && o.alien){
+    g.fillStyle = '#300'; g.fillRect(o.x - 24, o.y - o.r - 14, 48, 5);
+    g.fillStyle = '#ff5252'; g.fillRect(o.x - 24, o.y - o.r - 14, 48 * Math.max(0, o.hp / o.maxHp), 5);
+  }
+}
+
+function drawParticles(){
+  particles.forEach(p => {
+    const a = Math.max(0, p.life / p.max);
+    if(p.text){ g.globalAlpha = a; g.fillStyle = p.col; g.font = 'bold 24px system-ui'; g.textAlign = 'center'; g.fillText(p.text, p.x, p.y); }
+    else if(p.ring){ g.globalAlpha = a; g.strokeStyle = p.col; g.lineWidth = 4; g.beginPath(); g.arc(p.x, p.y, p.r * (1 - a) + 8, 0, 6.283); g.stroke(); }
+    else { g.globalAlpha = a * (p.smoke ? 0.7 : 1); g.fillStyle = p.col; g.beginPath(); g.arc(p.x, p.y, p.r * (p.smoke ? 2 - a : 1), 0, 6.283); g.fill(); }
+  });
+  g.globalAlpha = 1;
+}
+
+/* The ship grows with its upgrades: wider plating with the hull, more
+   nozzles with the engines, a bigger turret with the lasers, a dish with
+   the shields and a glowing core with the reactor. `S` is null in the
+   hangar, where it is shown standing still. */
+function drawShip(x, y, lv, S, sc){
+  g.save();
+  g.translate(x, y);
+  g.scale(sc, sc);
+  const w = 22 + lv.hull * 2.5, len = 46 + lv.hull * 3;
+  // flame
+  const thr = S ? (S.stall > 0 ? 0 : S.thr) : 0.3, boost = S && S.boostT > 0;
+  const nozzles = lv.eng >= 4 ? [-w * 0.6, 0, w * 0.6] : lv.eng >= 2 ? [-w * 0.4, w * 0.4] : [0];
+  if(!(S && S.stall > 0)){
+    nozzles.forEach(nx => {
+      const fl = (18 + thr * 40 + (boost ? 40 : 0)) * (0.85 + Math.random() * 0.3);
+      g.fillStyle = boost ? '#80d8ff' : '#ff9100';
+      g.beginPath(); g.moveTo(nx - 8, len * 0.62); g.lineTo(nx, len * 0.62 + fl); g.lineTo(nx + 8, len * 0.62); g.fill();
+      g.fillStyle = '#fff59d';
+      g.beginPath(); g.moveTo(nx - 4, len * 0.62); g.lineTo(nx, len * 0.62 + fl * 0.5); g.lineTo(nx + 4, len * 0.62); g.fill();
+    });
+  }
+  // fins
+  g.fillStyle = '#c62828';
+  g.beginPath(); g.moveTo(-w, len * 0.2); g.lineTo(-w - 14 - lv.hull * 2, len * 0.62); g.lineTo(-w, len * 0.55); g.fill();
+  g.beginPath(); g.moveTo(w, len * 0.2); g.lineTo(w + 14 + lv.hull * 2, len * 0.62); g.lineTo(w, len * 0.55); g.fill();
+  // nozzles
+  g.fillStyle = '#455a64';
+  nozzles.forEach(nx => g.fillRect(nx - 7, len * 0.5, 14, len * 0.13));
+  // body
+  const body = g.createLinearGradient(-w, 0, w, 0);
+  body.addColorStop(0, '#90a4ae'); body.addColorStop(0.45, '#eceff1'); body.addColorStop(1, '#78909c');
+  g.fillStyle = body;
+  g.beginPath();
+  g.moveTo(0, -len);
+  g.quadraticCurveTo(w * 1.1, -len * 0.4, w, len * 0.55);
+  g.lineTo(-w, len * 0.55);
+  g.quadraticCurveTo(-w * 1.1, -len * 0.4, 0, -len);
+  g.fill();
+  // plating stripes
+  g.strokeStyle = 'rgba(55,71,79,0.5)'; g.lineWidth = 2;
+  for(let i = 0; i < lv.hull; i++){ const yy = len * 0.4 - i * 9; g.beginPath(); g.moveTo(-w * 0.95, yy); g.lineTo(w * 0.95, yy); g.stroke(); }
+  // window and reactor core
+  g.fillStyle = '#4fc3f7'; g.beginPath(); g.arc(0, -len * 0.42, 8, 0, 6.283); g.fill();
+  if(lv.reactor > 0){
+    g.fillStyle = 'rgba(105,240,174,' + (0.5 + 0.3 * Math.sin(clock * 5)) + ')';
+    g.beginPath(); g.arc(0, len * 0.08, 4 + lv.reactor * 1.3, 0, 6.283); g.fill();
+  }
+  // shield dish
+  if(lv.shield > 0){
+    g.strokeStyle = '#4dd0e1'; g.lineWidth = 3;
+    g.beginPath(); g.moveTo(-w * 0.7, -len * 0.1); g.lineTo(-w * 0.7 - 6 - lv.shield * 2, -len * 0.25); g.stroke();
+    g.beginPath(); g.arc(-w * 0.7 - 6 - lv.shield * 2, -len * 0.25, 3 + lv.shield, 0, 6.283); g.stroke();
+  }
+  // turret
+  const ga = S ? S.gun.a : -0.4 + Math.sin(clock) * 0.4;
+  g.save();
+  g.translate(0, -6);
+  g.rotate(ga);
+  g.fillStyle = S && S.gun.over ? '#ff5252' : '#37474f';
+  const barrels = lv.laser >= 3 ? [-6, 6] : [0];
+  barrels.forEach(b => g.fillRect(b - 3, -26 - lv.laser * 2, 6, 24 + lv.laser * 2));
+  g.restore();
+  g.fillStyle = '#263238'; g.beginPath(); g.arc(0, -6, 9 + lv.laser, 0, 6.283); g.fill();
+  g.restore();
+
+  if(S && S.phase === 'flight'){
+    // the gunner's line of fire
+    g.strokeStyle = 'rgba(255,110,110,0.35)'; g.lineWidth = 2; g.setLineDash([6, 10]);
+    g.beginPath(); g.moveTo(x, y - 6); g.lineTo(x + Math.sin(S.gun.a) * 260, y - 6 - Math.cos(S.gun.a) * 260); g.stroke();
+    g.setLineDash([]);
+    // the shield on its side
+    const ang = {F: -Math.PI / 2, R: 0, B: Math.PI / 2, L: Math.PI}[S.side];
+    const strength = S.E / S.st.Emax;
+    g.strokeStyle = 'rgba(77,208,225,' + (0.25 + 0.6 * strength + shieldFlash * 0.4) + ')';
+    g.lineWidth = 6 + 6 * strength + shieldFlash * 6;
+    g.beginPath(); g.arc(x, y, 64 + lv.hull * 2, ang - 0.7, ang + 0.7); g.stroke();
+    shieldFlash = Math.max(0, shieldFlash - 0.06);
+  }
+}
+
+/* ---------- the heads-up display ---------- */
+function bar(x, y, w, h, frac, col, label, warn){
+  g.fillStyle = 'rgba(0,0,0,0.5)'; g.fillRect(x, y, w, h);
+  g.fillStyle = warn && Math.floor(clock * 6) % 2 ? '#ff1744' : col;
+  g.fillRect(x, y, w * Math.max(0, Math.min(1, frac)), h);
+  g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 1; g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+  g.fillStyle = '#fff'; g.font = 'bold 15px system-ui, sans-serif'; g.textAlign = 'left';
+  g.fillText(label, x + 6, y + h - 5);
+}
+
+function drawHud(S){
+  // everything on the HUD has to read against white cloud as well as black space
+  g.shadowColor = 'rgba(0,0,0,0.75)'; g.shadowBlur = 8;
+  drawHudInner(S);
+  g.shadowColor = 'transparent'; g.shadowBlur = 0;
+}
+function drawHudInner(S){
+  // distance, top middle
+  g.textAlign = 'center';
+  g.fillStyle = '#fff'; g.font = 'bold 54px system-ui, sans-serif';
+  g.fillText(Math.floor(S.maxAlt).toLocaleString() + ' km', W / 2, 62);
+  g.font = '18px system-ui, sans-serif'; g.fillStyle = 'rgba(255,255,255,0.75)';
+  g.fillText(S.sector.n ? 'SECTOR ' + S.sector.n + ' · ' + S.sector.name.toUpperCase() : (S.alt < SPACE_KM ? 'SPACE IN ' + Math.ceil(SPACE_KM - S.alt) + ' km' : ''), W / 2, 90);
+
+  // the ship's gauges, bottom left
+  const x = 20, y = H - 150;
+  g.fillStyle = 'rgba(5,10,25,0.6)'; g.fillRect(x - 10, y - 14, 330, 158);
+  bar(x, y, 310, 22, S.hull / S.st.hullMax, '#ef5350', 'HULL ' + Math.ceil(S.hull), S.hull < S.st.hullMax * 0.25);
+  bar(x, y + 28, 310, 22, S.E / S.st.Emax, '#4dd0e1', 'SHIELD ' + {F: 'FRONT', B: 'BACK', L: 'LEFT', R: 'RIGHT'}[S.side]);
+  bar(x, y + 56, 310, 22, S.fuel / S.st.fuelMax, '#69f0ae', 'FUEL', S.fuel < S.st.fuelMax * 0.15);
+  bar(x, y + 84, 310, 22, S.heat / 100, S.stall > 0 ? '#ff1744' : '#ffab40', S.stall > 0 ? 'ENGINES STALLED' : 'ENGINE HEAT', S.heat > 80);
+  // power split
+  const P = S.pips, names = [['s', 'SHD', '#4dd0e1'], ['w', 'GUN', '#ff6e6e'], ['e', 'ENG', '#69f0ae']];
+  names.forEach(([k, n, c], i) => {
+    const yy = y + 116 + 0, xx = x + i * 104;
+    g.fillStyle = '#9fb0c3'; g.font = 'bold 13px system-ui'; g.textAlign = 'left'; g.fillText(n, xx, yy + 13);
+    for(let j = 0; j < 5; j++){ g.fillStyle = j < P[k] ? c : 'rgba(255,255,255,0.15)'; g.fillRect(xx + 34 + j * 12, yy + 2, 9, 13); }
+  });
+
+  // speed, right of gauges
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = 'bold 22px system-ui';
+  g.fillText(Math.round(S.v / PX_PER_KM * 10) / 10 + ' km/s', x + 340, H - 22);
+
+  // the crew, bottom right
+  const cx = W - 300, cy = H - 150;
+  g.fillStyle = 'rgba(5,10,25,0.6)'; g.fillRect(cx - 10, cy - 14, 300, 158);
+  STATIONS.forEach((s, i) => {
+    const p = G.crew[s] && NET.people[G.crew[s]], info = STATION_INFO[s], yy = cy + i * 36;
+    g.fillStyle = info.col; g.fillRect(cx, yy, 8, 26);
+    g.font = 'bold 18px system-ui'; g.fillStyle = info.col; g.textAlign = 'left'; g.fillText(info.name.toUpperCase(), cx + 16, yy + 19);
+    g.font = '18px system-ui'; g.fillStyle = p && p.conn ? '#fff' : '#7f8c9d'; g.textAlign = 'right';
+    g.fillText(p ? (p.conn ? p.name : p.name + ' (away)') : 'Computer', cx + 280, yy + 19);
+  });
+
+  // join reminder while in flight
+  if(NET.code){
+    g.textAlign = 'right'; g.font = '16px system-ui'; g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.fillText('Join: room ' + NET.code, W - 20, 30);
+  }
+
+  if(G.banner){
+    const a = Math.min(1, G.banner.t * 2);
+    g.globalAlpha = a; g.textAlign = 'center';
+    g.fillStyle = '#fff'; g.font = 'bold 72px system-ui, sans-serif';
+    g.fillText(G.banner.text, W / 2, 300);
+    if(G.banner.sub){ g.font = '30px system-ui, sans-serif'; g.fillStyle = '#b3e5fc'; g.fillText(G.banner.sub, W / 2, 346); }
+    g.globalAlpha = 1;
+  }
+}
+
+function drawCount(){
+  const n = Math.ceil(G.countT);
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 200px system-ui, sans-serif';
+  g.fillText(n > 3 ? '3' : String(n), W / 2, 380);
+  g.font = 'bold 34px system-ui'; g.fillStyle = '#b3e5fc'; g.fillText('ALL STATIONS GO', W / 2, 440);
+}
+
+function drawResults(){
+  const L = G.last;
+  if(!L) return;
+  const a = Math.min(1, G.deadT / 1.2);
+  g.fillStyle = 'rgba(3,4,12,' + (0.82 * a) + ')'; g.fillRect(0, 0, W, H);
+  if(G.deadT < 1.2) return;
+  g.textAlign = 'center';
+  g.fillStyle = '#ff6e6e'; g.font = 'bold 64px system-ui'; g.fillText('SHIP DESTROYED', W / 2, 130);
+  g.fillStyle = '#b0bec5'; g.font = '26px system-ui'; g.fillText(L.cause + ' in ' + L.sector, W / 2, 172);
+  g.fillStyle = '#fff'; g.font = 'bold 110px system-ui'; g.fillText(L.km.toLocaleString() + ' km', W / 2, 300);
+  g.font = 'bold 34px system-ui';
+  if(L.newRecord){ g.fillStyle = Math.floor(clock * 3) % 2 ? '#ffd54f' : '#fff'; g.fillText('NEW FAMILY RECORD!' + (L.prev ? '  (was ' + L.prev + ' km)' : ''), W / 2, 356); }
+  else { g.fillStyle = '#9fb0c3'; g.fillText('Family record: ' + Math.floor(SAVE.record) + ' km', W / 2, 356); }
+  g.fillStyle = '#e1bee7'; g.font = 'bold 36px system-ui'; g.fillText('+' + L.earned + ' credits', W / 2, 410);
+
+  // what each station did
+  const st = L.stats;
+  const lines = [
+    ['pilot', 'grabbed ' + st.pickups + ' pickup' + (st.pickups === 1 ? '' : 's')],
+    ['shields', 'blocked ' + Math.round(st.blocked) + ' damage'],
+    ['gunner', 'destroyed ' + st.kills + ' thing' + (st.kills === 1 ? '' : 's')],
+    ['thrusters', 'fired the boosters ' + st.boosts + ' time' + (st.boosts === 1 ? '' : 's')]
+  ];
+  lines.forEach(([s, txt], i) => {
+    const info = STATION_INFO[s], who = L.crew[s] || 'The computer', y = 500 + i * 56;
+    g.textAlign = 'right'; g.fillStyle = info.col; g.font = 'bold 30px system-ui';
+    g.fillText(info.name.toUpperCase(), W / 2 - 30, y);
+    g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = '30px system-ui';
+    g.fillText(who + ' ' + txt, W / 2 - 10, y);
+  });
+  g.textAlign = 'center'; g.fillStyle = '#9fb0c3'; g.font = '24px system-ui';
+  g.fillText('Tap CONTINUE on a phone, or press Enter, to go to the hangar', W / 2, 800);
+}
+
+/* ---------- the hangar: lobby and shop on one screen ---------- */
+let qrCache = null;
+function drawQr(x, y, size){
+  if(!NET.code) return;
+  const url = controllerUrl();
+  if(!qrCache || qrCache.url !== url) qrCache = {url, m: qrMatrix(url, 'M')};
+  const m = qrCache.m;
+  if(!m) return;
+  const n = m.length, q = 4, px = Math.floor(size / (n + q * 2)), side = px * (n + q * 2);
+  g.fillStyle = '#fff'; g.fillRect(x, y, side, side);
+  g.fillStyle = '#000';
+  for(let r = 0; r < n; r++) for(let c = 0; c < n; c++) if(m[r][c]) g.fillRect(x + (c + q) * px, y + (r + q) * px, px, px);
+  return side;
+}
+
+function drawHangar(){
+  g.fillStyle = '#050816'; g.fillRect(0, 0, W, H);
+  STARS.forEach(s => { g.globalAlpha = 0.4 + 0.4 * Math.sin(clock * 1.5 + s.tw); g.fillStyle = '#fff'; g.fillRect(s.x, s.y, s.s, s.s); });
+  g.globalAlpha = 1;
+
+  // title
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 64px system-ui, sans-serif';
+  g.fillText('MISSION CONTROL', W / 2, 82);
+  g.fillStyle = '#9fb0c3'; g.font = '22px system-ui';
+  g.fillText(SAVE.record ? 'Family record: ' + Math.floor(SAVE.record).toLocaleString() + ' km  ·  ' + SAVE.runs + ' launch' + (SAVE.runs === 1 ? '' : 'es') : 'Fly as far into space as you can, together.', W / 2, 118);
+
+  // left: join
+  const lx = 60, ly = 170;
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = 'bold 30px system-ui'; g.fillText('JOIN WITH YOUR PHONE', lx, ly);
+  const side = drawQr(lx, ly + 20, 300) || 0;
+  g.font = '20px system-ui'; g.fillStyle = '#9fb0c3';
+  if(NET.code){
+    g.fillText('Scan, or open', lx, ly + side + 56);
+    g.fillStyle = '#fff'; g.font = '18px ui-monospace, monospace';
+    g.fillText(controllerUrl().replace(/#.*$/, '').replace(/^https?:\/\//, ''), lx, ly + side + 82);
+    g.fillStyle = '#9fb0c3'; g.font = '20px system-ui'; g.fillText('and enter the room code', lx, ly + side + 110);
+    g.fillStyle = '#ffd54f'; g.font = 'bold 64px ui-monospace, monospace'; g.fillText(NET.code, lx, ly + side + 176);
+  } else {
+    g.fillText(NET.status || 'Opening the room...', lx, ly + 60);
+  }
+
+  // middle: the ship and the crew
+  const mx = W / 2;
+  g.fillStyle = 'rgba(255,255,255,0.04)'; g.beginPath(); g.arc(mx, 330, 150, 0, 6.283); g.fill();
+  drawShip(mx, 340, SAVE.lv, null, 2.2);
+  STATIONS.forEach((s, i) => {
+    const info = STATION_INFO[s], p = G.crew[s] && NET.people[G.crew[s]];
+    const x = mx - 300 + (i % 2) * 310, y = 540 + Math.floor(i / 2) * 104;
+    g.fillStyle = 'rgba(255,255,255,0.06)'; g.fillRect(x, y, 290, 90);
+    g.fillStyle = info.col; g.fillRect(x, y, 8, 90);
+    g.textAlign = 'left'; g.font = 'bold 24px system-ui'; g.fillText(info.name.toUpperCase(), x + 20, y + 32);
+    g.font = '15px system-ui'; g.fillStyle = '#8899aa'; g.fillText(info.job, x + 20, y + 54);
+    g.font = 'bold 20px system-ui';
+    if(p){ g.fillStyle = p.conn ? '#fff' : '#7f8c9d'; g.fillText(p.name + (p.conn ? '' : ' (away)'), x + 20, y + 80); }
+    else { g.fillStyle = '#7f8c9d'; g.fillText('Computer', x + 20, y + 80); }
+    if(p && p.ready){ g.fillStyle = '#69f0ae'; g.textAlign = 'right'; g.font = 'bold 20px system-ui'; g.fillText('READY ✓', x + 280, y + 32); }
+  });
+
+  // right: the shop
+  const rx = W - 420, ry = 170;
+  g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = 'bold 30px system-ui'; g.fillText('HANGAR', rx, ry);
+  g.textAlign = 'right'; g.fillStyle = '#e1bee7'; g.font = 'bold 30px system-ui'; g.fillText(SAVE.credits.toLocaleString() + ' credits', rx + 370, ry);
+  MC.UPGRADES.forEach((u, i) => {
+    const y = ry + 30 + i * 92, l = SAVE.lv[u.key], c = MC.cost(SAVE.lv, u.key);
+    const lit = shopFlash && shopFlash.key === u.key;
+    g.fillStyle = lit ? 'rgba(225,190,231,' + (0.15 + shopFlash.t * 0.3) + ')' : 'rgba(255,255,255,0.05)';
+    g.fillRect(rx, y, 370, 80);
+    g.textAlign = 'left'; g.fillStyle = STATION_INFO[u.station].col; g.font = 'bold 22px system-ui'; g.fillText(u.name.toUpperCase(), rx + 14, y + 30);
+    for(let j = 0; j < MC.MAX_LV; j++){ g.fillStyle = j < l ? STATION_INFO[u.station].col : 'rgba(255,255,255,0.15)'; g.fillRect(rx + 150 + j * 22, y + 14, 16, 18); }
+    g.textAlign = 'right'; g.font = 'bold 20px system-ui';
+    g.fillStyle = c == null ? '#69f0ae' : c <= SAVE.credits ? '#e1bee7' : '#6b7787';
+    g.fillText(c == null ? 'MAX' : c + ' cr', rx + 356, y + 30);
+    g.textAlign = 'left'; g.font = '15px system-ui'; g.fillStyle = '#8899aa'; g.fillText(u.blurb, rx + 14, y + 60);
+  });
+  g.textAlign = 'left'; g.font = '17px system-ui'; g.fillStyle = '#9fb0c3';
+  g.fillText('Buy upgrades from any phone.', rx, ry + 500);
+
+  // bottom: how to go
+  const here = present();
+  g.textAlign = 'center'; g.font = 'bold 30px system-ui';
+  if(here.length){
+    const n = here.filter(p => p.ready).length;
+    g.fillStyle = '#69f0ae';
+    g.fillText('Everyone tap READY on your phone to launch  (' + n + '/' + here.length + ')', W / 2, H - 36);
+  } else {
+    g.fillStyle = Math.floor(clock * 2) % 2 ? '#fff' : '#b3e5fc';
+    g.fillText('Join on a phone - or press Enter to fly with a computer crew (arrow keys steer)', W / 2, H - 36);
+  }
+  if(G.last){
+    g.font = '18px system-ui'; g.fillStyle = '#7f8c9d';
+    g.fillText('Last launch: ' + G.last.km.toLocaleString() + ' km, +' + G.last.earned + ' credits', W / 2, H - 76);
+  }
+}
+
+openRoom();
+</script>
+</body>
+</html>

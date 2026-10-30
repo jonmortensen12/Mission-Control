@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#060a18">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Mission Control - Station</title>
+<style>
+  :root { --bg:#060a18; --panel:#0f1830; --line:#22304f; --ink:#e8eef8; --dim:#8a9ab3; --col:#4dd0e1; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink);
+    font: 16px system-ui, -apple-system, sans-serif; overflow:hidden;
+    -webkit-user-select:none; user-select:none; -webkit-touch-callout:none; touch-action:none; overscroll-behavior:none; }
+  .screen { position:fixed; inset:0; display:none; flex-direction:column;
+    padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(10px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
+  .screen.on { display:flex; }
+  button { font: inherit; color: inherit; border: 0; border-radius: 12px; cursor: pointer; touch-action: manipulation; }
+  /* under 16px and iOS zooms in on focus and never zooms back */
+  input { font-size: 18px; padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line);
+    background: #0b1224; color: var(--ink); width: 100%; -webkit-user-select:text; user-select:text; }
+
+  /* join */
+  #join { justify-content:center; align-items:center; gap:14px; overflow:auto; touch-action:auto; }
+  #join h1 { margin:0; font-size:30px; letter-spacing:1px; }
+  #join .sub { color:var(--dim); margin:0 0 6px; text-align:center; }
+  #join form { width:min(360px, 100%); display:flex; flex-direction:column; gap:10px; }
+  #join label { color:var(--dim); font-size:14px; }
+  #codeIn { text-transform:uppercase; letter-spacing:8px; font-size:28px; text-align:center; font-family: ui-monospace, monospace; }
+  #joinBtn { background:#2f81f7; color:#fff; padding:14px; font-size:20px; font-weight:700; }
+  #joinBtn:disabled { opacity:.5; }
+  #joinMsg { min-height:1.4em; color:#ffb4a8; text-align:center; width:min(360px,100%); }
+
+  /* the bar along the top of every in-game screen */
+  #top { display:flex; align-items:center; gap:10px; padding-bottom:8px; flex:0 0 auto; }
+  #chip { background:var(--col); color:#061018; font-weight:800; padding:6px 12px; border-radius:999px; letter-spacing:1px; font-size:15px; white-space:nowrap; }
+  #who { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex:1 1 auto; }
+  #hullMini { width:110px; height:14px; background:#2a1010; border-radius:7px; overflow:hidden; flex:0 0 auto; }
+  #hullMini i { display:block; height:100%; width:100%; background:#ef5350; }
+  #dot { width:12px; height:12px; border-radius:50%; background:#69f0ae; flex:0 0 auto; }
+  #dot.off { background:#ff5252; }
+  #note { position:fixed; left:0; right:0; top:50px; text-align:center; pointer-events:none; z-index:5; }
+  #note span { display:inline-block; background:rgba(255,82,82,.92); color:#fff; padding:6px 14px; border-radius:999px; font-weight:700; }
+  #note:empty { display:none; }
+
+  #game { padding-top: max(8px, env(safe-area-inset-top)); }
+  #body { flex:1 1 auto; position:relative; min-height:0; display:flex; }
+  .panel { flex:1 1 auto; display:none; min-height:0; gap:12px; }
+  .panel.on { display:flex; }
+
+  /* hangar */
+  #hangar { flex-direction:column; overflow-y:auto; touch-action:pan-y; padding-bottom:84px; }
+  #hangar h2 { margin:6px 0 2px; font-size:15px; color:var(--dim); letter-spacing:1px; }
+  .seats { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+  .seat { background:var(--panel); border:2px solid transparent; border-radius:12px; padding:10px 12px; text-align:left; min-height:72px; }
+  .seat b { display:block; font-size:17px; letter-spacing:1px; }
+  .seat span { color:var(--dim); font-size:14px; }
+  .seat.mine { border-color: var(--c); background: #13203d; }
+  .seat.taken { opacity:.55; }
+  .shop { display:flex; flex-direction:column; gap:8px; }
+  .item { display:flex; align-items:center; gap:10px; background:var(--panel); border-radius:12px; padding:10px 12px; }
+  .item .nm { flex:1 1 auto; min-width:0; }
+  .item .nm b { display:block; }
+  .item .nm small { color:var(--dim); display:block; font-size:13px; }
+  .lvl { display:flex; gap:3px; margin-top:4px; }
+  .lvl i { width:14px; height:8px; border-radius:2px; background:#2a3550; }
+  .lvl i.f { background: var(--c); }
+  .item button { background:#7b4bd1; color:#fff; padding:12px 12px; font-weight:700; min-width:96px; }
+  .item button:disabled { background:#2a3550; color:#6b7a93; }
+  #credits { color:#e1bee7; font-weight:800; }
+  #readyBtn { position:fixed; left:12px; right:12px; bottom: max(12px, env(safe-area-inset-bottom)); padding:18px; font-size:22px; font-weight:800;
+    background:#2e7d32; color:#fff; letter-spacing:1px; z-index:4; }
+  #readyBtn.on { background:#69f0ae; color:#062010; }
+
+  /* results */
+  #results { flex-direction:column; align-items:center; justify-content:center; text-align:center; gap:6px; }
+  #results .km { font-size:56px; font-weight:800; }
+  #results .why { color:var(--dim); }
+  #results .earn { color:#e1bee7; font-size:22px; font-weight:700; }
+  #results .rec { color:#ffd54f; font-weight:800; font-size:20px; }
+  #contBtn { margin-top:16px; background:#2f81f7; color:#fff; padding:16px 40px; font-size:20px; font-weight:800; }
+
+  /* shared bits of the stations */
+  .gauge { background:#0b1224; border-radius:10px; height:28px; position:relative; overflow:hidden; }
+  .gauge i { position:absolute; left:0; top:0; bottom:0; width:0; }
+  .gauge span { position:absolute; left:10px; top:0; line-height:28px; font-weight:700; font-size:14px; letter-spacing:.5px; text-shadow:0 1px 2px #000; }
+  .warn { color:#ff5252; font-weight:800; text-align:center; min-height:1.3em; letter-spacing:1px; }
+  .hint { color:var(--dim); font-size:14px; text-align:center; }
+  .col { display:flex; flex-direction:column; gap:10px; min-width:0; }
+
+  /* pilot */
+  #pilot { flex-direction:column; }
+  #stick { flex:1 1 auto; background: radial-gradient(circle at 50% 50%, #13203d, #0b1224); border-radius:18px; position:relative; overflow:hidden; border:2px solid #1d2b4b; }
+  #stick .rail { position:absolute; left:8%; right:8%; top:50%; height:6px; margin-top:-3px; background:#22304f; border-radius:3px; }
+  #knob { position:absolute; top:50%; left:50%; width:96px; height:96px; margin:-48px 0 0 -48px; border-radius:50%;
+    background: radial-gradient(circle at 35% 35%, #fff3c4, #ffd54f 60%, #b38f00); box-shadow:0 4px 18px rgba(0,0,0,.5); }
+  #stick .lbl { position:absolute; left:0; right:0; bottom:12px; text-align:center; color:var(--dim); }
+
+  /* thrusters */
+  #thrusters .col:first-child { flex:0 0 38%; }
+  #throttle { flex:1 1 auto; background:#0b1224; border-radius:16px; position:relative; overflow:hidden; border:2px solid #1d2b4b; }
+  #thrFill { position:absolute; left:0; right:0; bottom:0; background:linear-gradient(#69f0ae, #1b5e20); }
+  #thrRed { position:absolute; left:0; right:0; top:0; height:25%; background:repeating-linear-gradient(45deg, rgba(255,82,82,.18) 0 10px, transparent 10px 20px); border-bottom:2px dashed #ff5252; }
+  #thrVal { position:absolute; left:0; right:0; top:42%; text-align:center; font-size:34px; font-weight:800; text-shadow:0 2px 6px #000; }
+  #boostBtn { flex:1 1 auto; background:#0277bd; color:#fff; font-size:30px; font-weight:900; letter-spacing:2px; min-height:90px; }
+  #boostBtn.cool { background:#1d2b4b; color:#6b7a93; }
+  #speed { font-size:22px; font-weight:800; text-align:center; }
+
+  /* gunner */
+  #gunner { align-items:center; }
+  #aim { flex:0 0 auto; border-radius:50%; position:relative; background: radial-gradient(circle, #1a1220 0, #0b1224 70%); border:3px solid #3b2030; touch-action:none; }
+  #aim canvas { position:absolute; inset:0; width:100%; height:100%; }
+  #gunner .col { flex:1 1 auto; }
+  #fireLbl { font-size:22px; font-weight:800; text-align:center; letter-spacing:2px; }
+
+  /* shields */
+  #shieldBox { position:relative; flex:0 0 auto; }
+  .sideBtn { position:absolute; background:#13203d; color:#7fdbe8; font-weight:800; font-size:15px; border:2px solid #1d3b55; }
+  .sideBtn.on { background:#4dd0e1; color:#06202a; border-color:#b2ebf2; box-shadow:0 0 18px rgba(77,208,225,.6); }
+  #shipIco { position:absolute; left:50%; top:50%; width:36px; height:70px; margin:-35px 0 0 -18px; }
+  #power { flex:1 1 auto; justify-content:center; }
+  .prow { display:flex; align-items:center; gap:8px; background:var(--panel); border-radius:12px; padding:8px; }
+  .prow b { width:76px; font-size:14px; letter-spacing:1px; }
+  .prow .pp { flex:1 1 auto; display:flex; gap:4px; }
+  .prow .pp i { flex:1 1 0; height:22px; border-radius:4px; background:#22304f; }
+  .prow button { width:52px; height:48px; background:#22304f; font-size:26px; font-weight:800; }
+  #pipLeft { text-align:center; color:var(--dim); }
+
+  /* sideways or upright, the stations rearrange */
+  @media (orientation: portrait) {
+    #thrusters, #gunner, #shields { flex-direction:column; }
+    #thrusters .col:first-child { flex:1 1 55%; }
+    #gunner { align-items:stretch; }
+    #shieldBox { align-self:center; }
+  }
+</style>
+</head>
+<body>
+
+<div id="join" class="screen on">
+  <h1>MISSION CONTROL</h1>
+  <p class="sub">Your phone is a station on the bridge.</p>
+  <form id="joinForm" autocomplete="off">
+    <label for="nameIn">Your name</label>
+    <input id="nameIn" maxlength="14" placeholder="Captain ...">
+    <label for="codeIn">Room code (on the TV)</label>
+    <input id="codeIn" maxlength="4" inputmode="text" autocapitalize="characters" spellcheck="false">
+    <button id="joinBtn" type="submit">Join the crew</button>
+  </form>
+  <div id="joinMsg"></div>
+</div>
+
+<div id="game" class="screen">
+  <div id="top"><span id="chip">CREW</span><span id="who"></span><span id="hullMini"><i></i></span><span id="dot"></span></div>
+  <div id="note"></div>
+  <div id="body">
+
+    <div id="hangar" class="panel">
+      <h2>YOUR STATION <span style="font-weight:400">- tap one to take it</span></h2>
+      <div class="seats" id="seats"></div>
+      <h2>UPGRADES <span id="credits"></span></h2>
+      <div class="shop" id="shop"></div>
+      <button id="readyBtn">READY</button>
+    </div>
+
+    <div id="results" class="panel">
+      <div class="why" id="rWhy"></div>
+      <div class="km" id="rKm"></div>
+      <div class="rec" id="rRec"></div>
+      <div class="earn" id="rEarn"></div>
+      <button id="contBtn">CONTINUE</button>
+    </div>
+
+    <div id="pilot" class="panel">
+      <div id="stick"><div class="rail"></div><div id="knob"></div><div class="lbl">Drag left and right to steer - grab green fuel and red repairs</div></div>
+    </div>
+
+    <div id="thrusters" class="panel">
+      <div class="col">
+        <div id="throttle"><div id="thrFill"></div><div id="thrRed"></div><div id="thrVal">70%</div></div>
+      </div>
+      <div class="col" style="flex:1 1 auto">
+        <div id="speed">0 km/s</div>
+        <div class="gauge"><i id="gHeat" style="background:#ffab40"></i><span>ENGINE HEAT</span></div>
+        <div class="gauge"><i id="gFuel" style="background:#69f0ae"></i><span>FUEL</span></div>
+        <div class="warn" id="thrWarn"></div>
+        <button id="boostBtn">BOOST</button>
+        <div class="hint">Above the red line the engines heat up. Too hot and they stall.</div>
+      </div>
+    </div>
+
+    <div id="gunner" class="panel">
+      <div id="aim"><canvas id="aimCv"></canvas></div>
+      <div class="col">
+        <div id="fireLbl">HOLD TO FIRE</div>
+        <div class="gauge"><i id="gGun" style="background:#ff6e6e"></i><span>LASER HEAT</span></div>
+        <div class="warn" id="gunWarn"></div>
+        <div class="hint">Touch the circle where you want to shoot. The ship is in the middle - behind you is down.</div>
+      </div>
+    </div>
+
+    <div id="shields" class="panel">
+      <div id="shieldBox">
+        <button class="sideBtn" data-s="F">FRONT</button>
+        <button class="sideBtn" data-s="R">RIGHT</button>
+        <button class="sideBtn" data-s="B">BACK</button>
+        <button class="sideBtn" data-s="L">LEFT</button>
+        <svg id="shipIco" viewBox="0 0 36 70"><path d="M18 2 C30 20 30 40 28 56 L8 56 C6 40 6 20 18 2Z" fill="#cfd8dc"/><path d="M8 40 L1 62 L8 56Z M28 40 L35 62 L28 56Z" fill="#c62828"/><circle cx="18" cy="22" r="5" fill="#4fc3f7"/></svg>
+      </div>
+      <div class="col" id="power">
+        <div class="gauge"><i id="gShield" style="background:#4dd0e1"></i><span>SHIELD ENERGY</span></div>
+        <div class="prow" data-k="s"><button data-d="-1">-</button><b style="color:#4dd0e1">SHIELDS</b><div class="pp"></div><button data-d="1">+</button></div>
+        <div class="prow" data-k="w"><button data-d="-1">-</button><b style="color:#ff6e6e">LASERS</b><div class="pp"></div><button data-d="1">+</button></div>
+        <div class="prow" data-k="e"><button data-d="-1">-</button><b style="color:#69f0ae">ENGINES</b><div class="pp"></div><button data-d="1">+</button></div>
+        <div id="pipLeft"></div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script src="sim.js"></script>
+<script src="net.js"></script>
+<script>
+'use strict';
+/* Mission Control - the phone.
+
+   One page for every station. The television says which station this
+   phone holds ({t:'you'}) and what the ship looks like ({t:'s'}, ten times
+   a second); this page shows that station's controls and sends what the
+   thumb is doing.
+
+   A thumb never waits on a frame: input goes out the moment it changes,
+   and a timer re-sends it so the television knows this phone is still
+   here. requestAnimationFrame is only for drawing. */
+
+const PROTO = 1;
+const $ = id => document.getElementById(id);
+const COLS = {pilot:'#ffd54f', shields:'#4dd0e1', gunner:'#ff6e6e', thrusters:'#69f0ae'};
+const NAMES = {pilot:'PILOT', shields:'SHIELDS', gunner:'GUNNER', thrusters:'THRUSTERS'};
+const JOBS = {pilot:'Steer', shields:'Shields and power', gunner:'Lasers', thrusters:'Throttle and boost'};
+
+/* In local mode every "phone" is a tab of one browser, so what a phone
+   remembers - its name, and which phone it is - lives with the tab. */
+function box(){ return MCNet.isLocal() ? sessionStorage : localStorage; }
+function store(k, v){ try { box().setItem(k, v); } catch(e){} }
+function recall(k){ try { return box().getItem(k); } catch(e){ return null; } }
+// which phone this is, so a phone that drops and comes back gets its own seat back
+let devId = recall('mctl_dev');
+if(!devId){ devId = 'd' + Math.random().toString(36).slice(2, 12); store('mctl_dev', devId); }
+
+let conn = null, handle = null, code = '', myName = recall('mctl_name') || '';
+let st = null, S = {}, ready = false, joined = false;
+let retries = 0, retryTimer = null;
+
+/* ---------- joining ---------- */
+$('nameIn').value = myName;
+const hashCode = (location.hash || '').replace('#', '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 4);
+$('codeIn').value = hashCode;
+$('joinForm').addEventListener('submit', e => {
+  e.preventDefault();
+  myName = $('nameIn').value.trim().slice(0, 14) || 'Crew';
+  code = $('codeIn').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if(code.length !== 4){ $('joinMsg').textContent = 'The room code is the four letters on the TV.'; return; }
+  store('mctl_name', myName);
+  connect(false);
+});
+if(hashCode && myName) { code = hashCode; connect(false); }
+else if(!myName) $('nameIn').focus();
+
+function connect(auto){
+  try { if(handle) handle.destroy(); } catch(e){}
+  conn = null;
+  clearTimeout(retryTimer);
+  if(!auto){ $('joinBtn').disabled = true; $('joinMsg').textContent = 'Finding room ' + code + '...'; }
+  handle = MCNet.join(code, {
+    open: c => {
+      conn = c;
+      retries = 0;
+      joined = true;
+      c.on('data', onHost);
+      c.on('close', dropped);
+      c.send({t:'hello', name: myName, dev: devId, proto: PROTO});
+      $('joinBtn').disabled = false;
+      $('joinMsg').textContent = '';
+      $('dot').classList.remove('off');
+      note('');
+      show('game');
+      keepAwake();
+    },
+    error: t => {
+      if(auto || joined) return later();
+      $('joinBtn').disabled = false;
+      $('joinMsg').textContent =
+        t === 'peer-unavailable' ? 'No room called ' + code + '. Check the code on the TV.' :
+        t === 'timeout' ? 'Timed out. Is the TV showing this code?' :
+        t === 'library' ? 'Could not load the connection library. This needs internet.' :
+        t === 'browser-incompatible' ? 'This browser cannot connect (no WebRTC).' :
+        'Connection problem: ' + t;
+    }
+  });
+}
+
+/* Lost the television: try again quickly, then less often. Somebody who
+   glanced away wants the controls back by the time they look down. */
+function later(){
+  conn = null;
+  $('dot').classList.add('off');
+  if(retries > 10){ note('Lost the game. Tap here to rejoin.'); show('join'); joined = false; return; }
+  note('Reconnecting...');
+  const wait = Math.min(8000, 700 * Math.pow(2, Math.min(4, retries++)));
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => connect(true), wait);
+}
+function dropped(){ release(); later(); }
+document.addEventListener('visibilitychange', () => {
+  if(document.visibilityState === 'visible'){
+    keepAwake();
+    if(joined && !conn){ retries = 0; connect(true); }
+  } else release();
+});
+
+let wake = null;
+async function keepAwake(){
+  try { if(navigator.wakeLock && !wake){ wake = await navigator.wakeLock.request('screen'); wake.addEventListener('release', () => { wake = null; }); } } catch(e){}
+}
+
+function show(id){ ['join', 'game'].forEach(s => $(s).classList.toggle('on', s === id)); }
+function note(t){ $('note').innerHTML = t ? '<span></span>' : ''; if(t) $('note').firstChild.textContent = t; }
+function tx(m){ if(conn){ try { conn.send(m); } catch(e){} } }
+function buzz(p){ try { if(navigator.vibrate) navigator.vibrate(p); } catch(e){} }
+
+/* ---------- what the television says ---------- */
+function onHost(d){
+  if(!d || typeof d !== 'object') return;
+  if(d.t === 'host'){
+    // the television is newer than this page: load the new one
+    if(d.min > PROTO){ note('Updating...'); setTimeout(() => location.reload(), 500); }
+  } else if(d.t === 'you'){
+    if(st !== d.st){ st = d.st; release(); buildSeats(); }
+    paint();
+  } else if(d.t === 's'){
+    const was = S.ph;
+    S = d;
+    if(was !== S.ph){
+      if(S.ph === 'hangar'){ ready = false; buildShop(); }
+      if(S.ph === 'count') buzz(60);
+      if(S.ph === 'flight') release();
+    }
+    paint();
+  } else if(d.t === 'fx'){
+    if(d.k === 'hit') buzz(st === 'pilot' ? [70] : [40]);
+    else if(d.k === 'block') buzz(20);
+    else if(d.k === 'stall') buzz([120, 60, 120]);
+    else if(d.k === 'gunhot') buzz([30, 40, 30]);
+    else if(d.k === 'dead') buzz([200, 80, 300]);
+  }
+}
+
+/* ---------- painting the screen from the latest state ---------- */
+function panel(id){ document.querySelectorAll('.panel').forEach(p => p.classList.toggle('on', p.id === id)); }
+
+function paint(){
+  document.documentElement.style.setProperty('--col', st ? COLS[st] : '#8a9ab3');
+  $('chip').textContent = st ? NAMES[st] : 'NO SEAT';
+  $('who').textContent = myName;
+  if(S.hullMax) $('hullMini').firstChild.style.width = (100 * S.hull / S.hullMax) + '%';
+  const ph = S.ph;
+  if(ph === 'hangar' || !ph){ panel('hangar'); paintHangar(); return; }
+  if(ph === 'dead'){ panel('results'); paintResults(); return; }
+  if(!st){ panel('hangar'); paintHangar(); return; }
+  panel(st);
+  if(ph === 'count') note('LAUNCH IN ' + S.cd);
+  else if($('note').textContent.indexOf('LAUNCH') === 0) note('');
+  if(st === 'thrusters') paintThr();
+  if(st === 'gunner') paintGun();
+  if(st === 'shields') paintShields();
+}
+
+/* hangar */
+function buildSeats(){
+  const box = $('seats');
+  box.innerHTML = '';
+  ['pilot', 'shields', 'gunner', 'thrusters'].forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'seat'; b.dataset.s = s;
+    b.style.setProperty('--c', COLS[s]);
+    b.innerHTML = '<b></b><span></span>';
+    b.firstChild.textContent = NAMES[s];
+    b.firstChild.style.color = COLS[s];
+    b.addEventListener('click', () => { if(s !== st) tx({t:'pick', st: s}); });
+    box.appendChild(b);
+  });
+  paintSeats();
+}
+function paintSeats(){
+  document.querySelectorAll('.seat').forEach(b => {
+    const s = b.dataset.s, c = S.crew && S.crew[s];
+    b.classList.toggle('mine', s === st);
+    b.classList.toggle('taken', !!(c && c.on && s !== st));
+    b.lastChild.textContent = s === st ? 'You - ' + JOBS[s] : c ? c.name + (c.ready ? ' ✓' : '') : 'Computer - tap to take';
+  });
+}
+function buildShop(){
+  const box = $('shop');
+  box.innerHTML = '';
+  MC.UPGRADES.forEach(u => {
+    const row = document.createElement('div');
+    row.className = 'item'; row.dataset.k = u.key;
+    row.style.setProperty('--c', COLS[u.station]);
+    row.innerHTML = '<div class="nm"><b></b><small></small><div class="lvl"></div></div><button></button>';
+    row.querySelector('b').textContent = u.name;
+    row.querySelector('b').style.color = COLS[u.station];
+    row.querySelector('small').textContent = u.blurb;
+    for(let i = 0; i < MC.MAX_LV; i++) row.querySelector('.lvl').appendChild(document.createElement('i'));
+    row.querySelector('button').addEventListener('click', () => { tx({t:'buy', key: u.key}); buzz(15); });
+    box.appendChild(row);
+  });
+}
+function paintHangar(){
+  if(!$('seats').children.length) buildSeats();
+  if(!$('shop').children.length) buildShop();
+  paintSeats();
+  $('credits').textContent = '- ' + (S.credits || 0) + ' credits';
+  document.querySelectorAll('.item').forEach(row => {
+    const k = row.dataset.k, lv = (S.lv && S.lv[k]) || 0, c = MC.cost(S.lv || {}, k);
+    row.querySelectorAll('.lvl i').forEach((i, n) => i.classList.toggle('f', n < lv));
+    const btn = row.querySelector('button');
+    btn.textContent = c == null ? 'MAX' : 'BUY ' + c;
+    btn.disabled = c == null || (S.credits || 0) < c;
+  });
+  // a seat's tick comes from the television; a phone with no seat keeps its own
+  const mine = st && S.crew && S.crew[st];
+  if(mine) ready = !!mine.ready;
+  $('readyBtn').classList.toggle('on', ready);
+  $('readyBtn').textContent = ready ? 'READY ✓  (tap to undo)' : 'READY';
+}
+$('readyBtn').addEventListener('click', () => { ready = !ready; tx({t:'ready', v: ready}); buzz(25); $('readyBtn').classList.toggle('on', ready); });
+
+/* results */
+function paintResults(){
+  const L = S.last;
+  if(!L) return;
+  $('rWhy').textContent = L.cause;
+  $('rKm').textContent = L.km.toLocaleString() + ' km';
+  $('rRec').textContent = L.newRecord ? 'NEW FAMILY RECORD!' : 'Record: ' + (S.record || 0).toLocaleString() + ' km';
+  $('rEarn').textContent = '+' + L.earned + ' credits';
+}
+$('contBtn').addEventListener('click', () => tx({t:'ready', v: true}));
+
+/* ---------- input: one object, sent when it changes ---------- */
+let inp = {t:'in'}, sentAt = 0, dirty = false;
+function push(){
+  dirty = true;
+  const now = performance.now();
+  if(now - sentAt > 15){ tx(inp); sentAt = now; dirty = false; }
+}
+// a seat re-sends its controls; a phone without one still says it is here
+setInterval(() => {
+  if(!conn || !(dirty || performance.now() - sentAt > (st ? 150 : 1000))) return;
+  tx(st ? inp : {t:'ping'});
+  sentAt = performance.now(); dirty = false;
+}, 20);
+// closing the page says goodbye rather than leaving the TV to notice
+addEventListener('pagehide', () => { try { if(handle) handle.destroy(); } catch(e){} });
+
+/* Let go of everything: the page went to the background, the connection
+   went, or this phone changed seats. Nobody should be left holding a
+   trigger they cannot see. */
+function release(){
+  inp = {t:'in'};
+  if(st === 'thrusters') inp.thr = thrVal;
+  knob(0);
+  firing(false);
+  if(conn) tx(inp);
+}
+
+/* A drag that belongs to one element until the finger lifts, however it
+   ends: lifted, cancelled by the phone, or the capture taken away. */
+function drag(el, move, end){
+  let id = null;
+  el.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    id = e.pointerId;
+    try { el.setPointerCapture(id); } catch(err){}
+    move(e, true);
+  });
+  el.addEventListener('pointermove', e => { if(e.pointerId === id) move(e, false); });
+  const stop = e => {
+    if(e.pointerId !== id) return;
+    id = null;
+    try { el.releasePointerCapture(e.pointerId); } catch(err){}
+    end && end(e);
+  };
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(t => el.addEventListener(t, stop));
+}
+
+/* pilot: a stick that starts wherever the thumb lands */
+let x0 = 0;
+function knob(px){
+  const box = $('stick'), w = box.clientWidth;
+  $('knob').style.transform = 'translateX(' + (px * w * 0.38) + 'px)';
+}
+drag($('stick'), (e, first) => {
+  const r = $('stick').getBoundingClientRect();
+  if(first) x0 = e.clientX;
+  // a short throw for a full turn: thumbs travel a few centimetres, not the whole screen
+  let px = (e.clientX - x0) / Math.max(60, r.width * 0.22);
+  px = Math.max(-1, Math.min(1, px));
+  inp.px = +px.toFixed(3);
+  knob(px);
+  push();
+}, () => { inp.px = 0; knob(0); push(); });
+
+/* thrusters: the throttle stays where it is put */
+let thrVal = 0.7;
+function setThr(v){
+  thrVal = Math.max(0, Math.min(1, v));
+  inp.thr = +thrVal.toFixed(3);
+  $('thrFill').style.height = (thrVal * 100) + '%';
+  $('thrVal').textContent = Math.round(thrVal * 100) + '%';
+}
+setThr(0.7);
+drag($('throttle'), e => {
+  const r = $('throttle').getBoundingClientRect();
+  setThr(1 - (e.clientY - r.top) / r.height);
+  push();
+});
+$('boostBtn').addEventListener('pointerdown', e => { e.preventDefault(); tx({t:'act', a:{t:'boost'}}); buzz(40); });
+function pct(id, f){ $(id).style.width = Math.max(0, Math.min(100, f * 100)) + '%'; }
+function paintThr(){
+  if(S.heat == null) return;
+  pct('gHeat', S.heat / 100);
+  pct('gFuel', S.fuel / S.fuelMax);
+  $('speed').textContent = (Math.round(S.v / 5) / 10) + ' km/s';
+  $('thrWarn').textContent = S.stall ? 'ENGINES STALLED - COOLING' : S.heat > 80 ? 'TOO HOT - THROTTLE DOWN' :
+                             S.fuel <= 0 ? 'OUT OF FUEL' : S.fuel < S.fuelMax * 0.2 ? 'FUEL LOW' : '';
+  $('boostBtn').classList.toggle('cool', !!S.boost || !!S.stall);
+  $('boostBtn').textContent = S.boost ? 'BOOST ' + Math.ceil(S.boost) : 'BOOST';
+}
+
+/* gunner: touch where to shoot, hold to keep shooting */
+const aimCv = $('aimCv'), ag = aimCv.getContext('2d');
+let aimA = 0, fire = false;
+function firing(v){ fire = v; inp.gf = v; $('fireLbl').textContent = v ? 'FIRING' : 'HOLD TO FIRE'; }
+drag($('aim'), e => {
+  const r = $('aim').getBoundingClientRect();
+  const dx = e.clientX - (r.left + r.width / 2), dy = e.clientY - (r.top + r.height / 2);
+  aimA = Math.atan2(dx, -dy);
+  inp.ga = +aimA.toFixed(3);
+  firing(true);
+  push();
+}, () => { firing(false); push(); });
+function paintGun(){
+  if(S.gheat == null) return;
+  pct('gGun', S.gheat / 100);
+  $('gunWarn').textContent = S.gover ? 'OVERHEATED - WAIT' : !S.ammo ? 'NO POWER TO LASERS - ASK SHIELDS' : '';
+}
+
+/* shields: which side, and how the power is shared */
+document.querySelectorAll('.sideBtn').forEach(b => b.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  tx({t:'act', a:{t:'side', s: b.dataset.s}});
+  S.side = b.dataset.s;   // show it now rather than a tenth of a second from now
+  paintShields();
+  buzz(12);
+}));
+document.querySelectorAll('.prow button').forEach(b => b.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  tx({t:'act', a:{t:'pip', sys: b.parentNode.dataset.k, d: +b.dataset.d}});
+  buzz(10);
+}));
+function paintShields(){
+  document.querySelectorAll('.sideBtn').forEach(b => b.classList.toggle('on', b.dataset.s === S.side));
+  if(S.Emax) pct('gShield', S.E / S.Emax);
+  if(!S.pips) return;
+  let used = 0;
+  document.querySelectorAll('.prow').forEach(row => {
+    const k = row.dataset.k, n = S.pips[k], pp = row.querySelector('.pp');
+    used += n;
+    if(pp.children.length !== 5) { pp.innerHTML = ''; for(let i = 0; i < 5; i++) pp.appendChild(document.createElement('i')); }
+    const col = {s:'#4dd0e1', w:'#ff6e6e', e:'#69f0ae'}[k];
+    [...pp.children].forEach((i, j) => { i.style.background = j < n ? col : ''; });
+  });
+  $('pipLeft').textContent = (S.pipMax - used) + ' spare of ' + S.pipMax + ' power';
+}
+
+/* ---------- sizes that depend on the screen ---------- */
+function layout(){
+  const body = $('body').getBoundingClientRect();
+  const portrait = innerHeight > innerWidth;
+  // the aim pad: as big a circle as fits
+  const a = portrait ? Math.min(body.width, body.height * 0.62) : Math.min(body.height, body.width * 0.55);
+  $('aim').style.width = $('aim').style.height = Math.floor(a) + 'px';
+  aimCv.width = aimCv.height = Math.floor(a * devicePixelRatio);
+  // the shield ring
+  const s = portrait ? Math.min(body.width, body.height * 0.5) : Math.min(body.height, body.width * 0.45);
+  const box = $('shieldBox'); box.style.width = box.style.height = Math.floor(s) + 'px';
+  const bw = Math.max(76, s * 0.3), bh = Math.max(52, s * 0.2);
+  const pos = {F:[s / 2 - bw / 2, 0], B:[s / 2 - bw / 2, s - bh], L:[0, s / 2 - bh / 2], R:[s - bw, s / 2 - bh / 2]};
+  document.querySelectorAll('.sideBtn').forEach(b => {
+    const p = pos[b.dataset.s];
+    Object.assign(b.style, {left: p[0] + 'px', top: p[1] + 'px', width: bw + 'px', height: bh + 'px'});
+  });
+}
+addEventListener('resize', () => setTimeout(layout, 50));
+new ResizeObserver(layout).observe($('body'));
+
+function drawAim(){
+  requestAnimationFrame(drawAim);
+  if(st !== 'gunner' || !$('gunner').classList.contains('on')) return;
+  const n = aimCv.width, c = n / 2;
+  ag.clearRect(0, 0, n, n);
+  ag.strokeStyle = 'rgba(255,110,110,0.18)'; ag.lineWidth = 2 * devicePixelRatio;
+  [0.33, 0.66].forEach(f => { ag.beginPath(); ag.arc(c, c, c * f, 0, 6.283); ag.stroke(); });
+  ag.beginPath(); ag.moveTo(c, 0); ag.lineTo(c, n); ag.moveTo(0, c); ag.lineTo(n, c); ag.stroke();
+  // where the turret really points (from the television), and where we asked
+  const ta = S.ga != null ? S.ga : aimA;
+  ag.strokeStyle = fire ? '#ff5252' : '#ff9e9e'; ag.lineWidth = 6 * devicePixelRatio; ag.lineCap = 'round';
+  ag.beginPath(); ag.moveTo(c, c); ag.lineTo(c + Math.sin(ta) * c * 0.92, c - Math.cos(ta) * c * 0.92); ag.stroke();
+  ag.fillStyle = '#cfd8dc';
+  ag.beginPath(); ag.moveTo(c, c - 22 * devicePixelRatio); ag.lineTo(c + 11 * devicePixelRatio, c + 16 * devicePixelRatio);
+  ag.lineTo(c - 11 * devicePixelRatio, c + 16 * devicePixelRatio); ag.closePath(); ag.fill();
+  ag.fillStyle = '#8a9ab3'; ag.font = (13 * devicePixelRatio) + 'px system-ui'; ag.textAlign = 'center';
+  ag.fillText('AHEAD', c, 18 * devicePixelRatio); ag.fillText('BEHIND', c, n - 8 * devicePixelRatio);
+}
+requestAnimationFrame(drawAim);
+layout();
+</script>
+</body>
+</html>

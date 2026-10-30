@@ -1,0 +1,13 @@
+{
+  "name": "mission-control",
+  "compatibility_date": "2026-10-01",
+
+  // Static files only, for now: the TV page, the phone page and their
+  // scripts. Only web/ is uploaded - the check scripts and the notes beside
+  // it stay in the repo and off the internet.
+  //
+  // No Worker yet. The day there is a licence gate or a relay for networks
+  // that keep devices apart, it goes in worker.js, the way Family Beatdown
+  // does it.
+  "assets": { "directory": "web" }
+}
