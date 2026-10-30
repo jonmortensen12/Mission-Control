@@ -17,8 +17,19 @@
 'use strict';
 
 var W = 1600, H = 900, SHIP_Y = 700, SHIP_R = 34;
-var PX_PER_KM = 50;
+var PX_PER_KM = 50;             // in space
+var ATM_PX_PER_KM = 110;        // in the atmosphere: a longer climb than the numbers say
 var SPACE_KM = 100;            // the Karman line: gravity off, sectors begin
+var STAGE_KM = 45;             // where the booster runs dry and has to be dropped
+var MAXQ = [10, 26];           // the band where going too fast tears at the hull
+var MAXQ_V = 175;              // px/s: faster than this in the band does damage
+
+/* How far up the screen an altitude is, counting from the pad. The
+   atmosphere is drawn at more pixels to the kilometre than space, so the
+   climb takes a minute and more without the ship crawling. */
+function altPx(alt){
+  return alt < SPACE_KM ? alt * ATM_PX_PER_KM : SPACE_KM * ATM_PX_PER_KM + (alt - SPACE_KM) * PX_PER_KM;
+}
 var SECTOR_KM = 400;
 var STATIONS = ['pilot', 'shields', 'gunner', 'thrusters'];   // priority order
 var SIDES = ['F', 'R', 'B', 'L'];
@@ -86,13 +97,16 @@ function newRun(seed, lv){
     lv: lv, st: st,
     t: 0, phase: 'flight', cause: '',
     alt: 0, maxAlt: 0, v: 0, lifted: false,
+    staged: false, stageDue: false,   // the booster: dropped yet, and is it time
+    gust: 0, gustT: 3,                 // turbulence: the push now, and the next one
+    stress: 0,                         // Max-Q: how hard the air is pulling at the hull, 0-1
     x: W / 2, vx: 0,
     hull: st.hullMax, E: st.Emax, side: 'F', sideCd: 0,
     pips: {s: 2, w: 2, e: 2},
     thr: 0.7, heat: 0, stall: 0, fuel: st.fuelMax, boostT: 0, boostCd: 0,
     gun: {a: 0, heat: 0, over: false, cd: 0},
     objs: [], bolts: [], ebolts: [],
-    events: [],
+    events: [], queued: [], inStep: false,
     spawn: {},
     sector: {n: 0, name: 'Launch Pad', theme: 'earth', at: 0},
     boss: null,            // the mothership, while there is one
@@ -100,7 +114,7 @@ function newRun(seed, lv){
     flareT: 40,            // seconds until the next one is due
     planet: null,
     zone: 'ground',
-    stats: {kills: 0, blocked: 0, pickups: 0, boosts: 0, gems: 0, hits: 0, killCr: 0,
+    stats: {kills: 0, blocked: 0, pickups: 0, boosts: 0, gems: 0, hits: 0, killCr: 0, stages: 0, steer: 0,
             bosses: 0, flares: 0, planets: []},
     ai: {pilot: {t: 0, px: 0}, gunner: {t: 0, target: null, a: 0}, shields: {t: 0, flareSeen: 0}},
     nextId: 1
@@ -110,7 +124,11 @@ function newRun(seed, lv){
   return S;
 }
 
-function emit(S, type, o){ o = o || {}; o.type = type; S.events.push(o); }
+/* Events are what the TV turns into sound and sparks. Ones raised by an
+   action between ticks (a shield turned, a boost, staging) wait in
+   S.queued and come out with the next tick's, rather than being wiped by
+   it - which is what used to happen, so those never made a sound. */
+function emit(S, type, o){ o = o || {}; o.type = type; (S.inStep ? S.events : S.queued).push(o); }
 
 /* ---------- actions: the discrete things a station does ---------- */
 function act(S, a){
@@ -122,6 +140,11 @@ function act(S, a){
       S.boostT = 1.2; S.boostCd = 4; S.fuel -= 6; S.heat += 18;
       S.stats.boosts++;
       emit(S, 'boost');
+    }
+  } else if(a.t === 'stage'){
+    if(S.stageDue && !S.staged){
+      S.staged = true; S.stageDue = false; S.stats.stages = 1;
+      emit(S, 'staged', {x: S.x});
     }
   } else if(a.t === 'pip'){
     pip(S, a.sys, a.d);
@@ -292,20 +315,32 @@ function spawnTick(S, dt){
   }
   if(alt < SPACE_KM){
     if(!S.lifted) return;
-    if(alt < 14 && every('bird', 0.9))
-      spawnObj(S, {kind: 'bird', x: rr(r, 80, 1520), y: -40, r: 16, vx: rr(r, -90, 90), vy: 0,
-                   hp: 1, dmg: 6, hostile: true, cr: 1, flap: rr(r, 0, 6)});
-    if(alt > 8 && alt < 55 && every('plane', 0.45)){
+    // thunderclouds: not solid, but they throw lightning at anything close
+    if(alt > 3 && alt < 20 && every('storm', 0.4))
+      spawnObj(S, {kind: 'storm', x: rr(r, 120, 1480), y: -120, r: 90, vx: rr(r, -30, 30),
+                   hostile: false, avoid: true, zapT: rr(r, 0.5, 1.2)});
+    // geese, in a V, which is a wall to fly round or a lot of shooting
+    if(alt < 16 && every('bird', 0.55)){
+      var n = 3 + Math.floor(r() * 5), bx = rr(r, 150, 1450), bvx = rr(r, -90, 90);
+      for(var bi = 0; bi < n; bi++){
+        var side = bi % 2 ? 1 : -1, rank = Math.ceil(bi / 2);
+        spawnObj(S, {kind: 'bird', x: bx + side * rank * 38, y: -40 - rank * 30, r: 16, vx: bvx, vy: 0,
+                     hp: 1, dmg: 6, hostile: true, cr: 1, flap: rr(r, 0, 6)});
+      }
+    }
+    if(alt > 8 && alt < 55 && every('plane', 0.6)){
       var fromL = r() < 0.5;
       spawnObj(S, {kind: 'plane', x: fromL ? -60 : 1660, y: rr(r, 60, 420), r: 28,
                    vx: fromL ? rr(r, 160, 260) : -rr(r, 160, 260), vy: 0, ride: 0.5,
                    hp: 3, dmg: 14, hostile: true, cr: 2});
     }
-    if(alt > 25 && alt < 90 && every('balloon', 0.35))
+    if(alt > 25 && alt < 90 && every('balloon', 0.5))
       spawnObj(S, {kind: 'balloon', x: rr(r, 80, 1520), y: -50, r: 22, vx: rr(r, -20, 20),
                    hp: 1, dmg: 8, hostile: true, cr: 1});
-    if(alt > 60 && every('junk', 0.5))
+    if(alt > 60 && every('junk', 0.7))
       asteroid(S, rr(r, 80, 1520), -50, rr(r, 14, 24), rr(r, -40, 40), rr(r, 0, 50), 0).kind = 'junk';
+    if(alt > 20 && every('fuel', 0.05))
+      spawnObj(S, {kind: 'fuel', x: rr(r, 120, 1480), y: -40, r: 20, hostile: false});
     return;
   }
 
@@ -375,6 +410,7 @@ function hurt(S, dmg, from, what){
     S.hull = 0;
     var NICE = {bolt: 'Shot down', rock: 'Hit by an asteroid', junk: 'Hit by space junk',
                 mother: 'Rammed the mothership', torpedo: 'Hit by a torpedo', bird: 'Hit a bird',
+                lightning: 'Struck by lightning',
                 plane: 'Hit a plane', balloon: 'Hit a weather balloon'};
     die(S, NICE[what] || (/^a /.test(what) ? 'Burned by ' + what : what ? 'Destroyed by a ' + what : 'Destroyed'));
   }
@@ -409,8 +445,14 @@ function kill(S, o){
    inp: {px:-1..1 pilot stick, thr:0..1 throttle, ga: turret angle (0 is up,
    clockwise), gf: turret firing}. Discrete things go through act(). */
 function step(S, inp, dt){
-  S.events.length = 0;
+  S.events = S.queued;
+  S.queued = [];
   if(S.phase !== 'flight') return;
+  S.inStep = true;
+  try { stepTick(S, inp, dt); } finally { S.inStep = false; }
+}
+
+function stepTick(S, inp, dt){
   var st = S.st, r = S.rng;
   S.t += dt;
 
@@ -419,13 +461,30 @@ function step(S, inp, dt){
   S.thr = thr;
   var engF = 0.55 + 0.15 * S.pips.e, agility = 0.6 + 0.15 * S.pips.e;
   var fuelOK = S.fuel > 0 ? 1 : 0.35;
-  var thrust = S.stall > 0 ? 0 : 420 * st.thrustMul * engF * thr * fuelOK;
+  // a spent booster still strapped on: half thrust until somebody drops it
+  var boosterOK = S.stageDue && !S.staged ? 0.5 : 1;
+  var thrust = S.stall > 0 ? 0 : 420 * st.thrustMul * engF * thr * fuelOK * boosterOK;
   if(S.boostT > 0){ thrust += 520; S.boostT -= dt; }
   if(S.boostCd > 0) S.boostCd -= dt;
-  var g = S.alt < SPACE_KM ? 90 * (1 - S.alt / SPACE_KM) : 0;
+  /* Gravity is strong low down: at the pad the engines need more than 45%
+     just to hover, and a stall below a few kilometres is a fall back to
+     Earth. It fades to nothing at the Karman line. */
+  var atm = S.alt < SPACE_KM;
+  var g = atm ? 40 + 120 * (1 - S.alt / SPACE_KM) : 0;
   var a = thrust - g - 1.0 * S.v;
   S.v += a * dt;
-  S.alt += S.v * dt / PX_PER_KM;
+  S.alt += S.v * dt / (atm ? ATM_PX_PER_KM : PX_PER_KM);
+  if(!S.staged && !S.stageDue && S.alt >= STAGE_KM){ S.stageDue = true; emit(S, 'stagedue'); }
+  // Max-Q: too fast through the thick air and the hull feels it
+  var inQ = S.alt > MAXQ[0] && S.alt < MAXQ[1];
+  var over = inQ ? Math.max(0, S.v - MAXQ_V) : 0;
+  var was = S.stress;
+  S.stress = Math.min(1, over / 120);
+  if(over > 0){
+    S.hull -= over * 0.06 * dt;
+    if(was === 0) emit(S, 'maxq');
+    if(S.hull <= 0 && S.phase === 'flight'){ S.hull = 0; die(S, 'Torn apart at Max-Q - too fast in the thick air'); return; }
+  }
   if(S.alt > 0.6) S.lifted = true;
   if(S.alt <= 0){
     S.alt = 0;
@@ -440,6 +499,8 @@ function step(S, inp, dt){
   }
   if(thr > 0.75) S.heat += (thr - 0.75) * 80 * st.heatMul * dt;
   else S.heat -= (14 + (0.75 - thr) * 20) * dt;
+  // climbing through thick air, the engines run hotter
+  if(atm && thr > 0.6) S.heat += (thr - 0.6) * 18 * (1 - S.alt / SPACE_KM) * st.heatMul * dt;
   if(S.heat < 0) S.heat = 0;
   if(S.heat >= 100 && S.stall <= 0){
     S.stall = 3; S.heat = 70;
@@ -451,9 +512,34 @@ function step(S, inp, dt){
   }
 
   // ----- steering -----
+  /* The side thrusters run off the same tanks and the same engines as the
+     main burn: every swerve costs fuel and heat. A pilot throwing the ship
+     about makes the thrusters officer's job harder, and a hot engine is a
+     reason for the pilot to fly smoother. */
   var target = clamp(inp.px || 0, -1, 1) * 560 * agility;
   var maxDv = 2400 * agility * dt;
-  S.vx += clamp(target - S.vx, -maxDv, maxDv);
+  var dv = clamp(target - S.vx, -maxDv, maxDv);
+  if(S.stall > 0) dv *= 0.35;                 // no engines, no side thrust to speak of
+  if(S.fuel <= 0) dv *= 0.5;
+  S.vx += dv;
+  var steerCost = Math.abs(dv);
+  S.heat += steerCost * 0.011 * st.heatMul;
+  if(S.fuel > 0) S.fuel = Math.max(0, S.fuel - steerCost * 0.0035);
+  S.stats.steer = (S.stats.steer || 0) + steerCost;
+  // turbulence in the low sky: gusts that shove the ship sideways, and the
+  // jet stream, a steady push between 8 and 14 km
+  if(atm && S.lifted){
+    S.gustT -= dt;
+    if(S.gustT <= 0){
+      S.gustT = rr(r, 1.5, 4);
+      var strength = S.alt < 60 ? 1 : (SPACE_KM - S.alt) / 40;
+      S.gust = (r() < 0.5 ? -1 : 1) * rr(r, 140, 300) * strength;
+      emit(S, 'gust', {dir: S.gust > 0 ? 1 : -1});
+    }
+    S.vx += S.gust * dt;
+    S.gust *= 1 - 1.6 * dt;
+    if(S.alt > 8 && S.alt < 14) S.vx += 110 * dt;
+  } else S.gust = 0;
   if(S.planet && S.sector.theme === 'flyby')
     S.vx += (S.planet.x < S.x ? -1 : 1) * 70 * dt;
   S.x += S.vx * dt;
@@ -558,6 +644,19 @@ function step(S, inp, dt){
                        hp: 2, dmg: 22 * (1 + 0.15 * d), hostile: true, cr: 2});
         }
       }
+    } else if(o.kind === 'storm'){
+      o.x += o.vx * dt;
+      o.y += S.v * dt;
+      o.zapT -= dt;
+      if(o.zapT <= 0){
+        o.zapT = rr(r, 0.9, 1.6);
+        var zd = Math.hypot(o.x - S.x, o.y - SHIP_Y);
+        if(zd < o.r + 170){
+          emit(S, 'zap', {x: S.x, y: SHIP_Y, from: {x: o.x, y: o.y}, bolt: true});
+          hurt(S, 7, o, 'lightning');
+          if(S.phase !== 'flight') return;
+        }
+      }
     } else if(o.kind === 'torpedo'){
       var tx2 = S.x - o.x, ty2 = SHIP_Y - o.y, tl = Math.hypot(tx2, ty2) || 1, sp = 170 + 12 * d;
       o.vx += (tx2 / tl * sp - o.vx) * 1.2 * dt;
@@ -580,6 +679,7 @@ function step(S, inp, dt){
     var cr = o.r + SHIP_R * 0.8;
     if(Math.abs(o.x - S.x) < cr && Math.abs(o.y - SHIP_Y) < cr &&
        Math.hypot(o.x - S.x, o.y - SHIP_Y) < cr){
+      if(o.avoid) continue;               // a thundercloud is not solid
       if(o.boss){
         if(!(o.bump > 0)){ o.bump = 1; hurt(S, o.dmg, o, 'mother'); if(S.phase !== 'flight') return; }
         continue;
@@ -659,10 +759,22 @@ function ai(S, auto, inp, dt){
   var acts = [], r = S.airng, A = S.ai;
 
   if(auto.thrusters){
-    var t = S.alt < SPACE_KM ? 0.8 : 0.62;
-    if(S.heat > 65) t = 0.6;
-    if(S.fuel < 20 && S.alt >= SPACE_KM) t = 0.45;
+    var t;
+    if(S.alt < SPACE_KM){
+      // just under the red line, backing off through Max-Q and when hot
+      t = 0.74;
+      if(S.alt > MAXQ[0] - 2 && S.alt < MAXQ[1] && S.v > MAXQ_V - 25) t = 0.55;
+      if(S.heat > 70) t = 0.62;
+    } else {
+      t = 0.62;
+      if(S.heat > 65) t = 0.6;
+      if(S.fuel < 20) t = 0.45;
+    }
     inp.thr = t;
+    if(S.stageDue && !S.staged){
+      A.stageWait = (A.stageWait || 0) + dt;
+      if(A.stageWait > 1.8) acts.push({t: 'stage'});
+    }
   }
 
   if(auto.pilot){
@@ -677,7 +789,8 @@ function ai(S, auto, inp, dt){
           var ahead = SHIP_Y - o.y;
           if(ahead < -60 || ahead > 480) continue;
           var gap = Math.abs(o.x - cx) - o.r - SHIP_R;
-          if(o.hostile){ if(gap < 40) score -= (40 - gap) * (1.6 - ahead / 480); }
+          if(o.avoid){ if(gap < 120) score -= (120 - gap) * 0.25; }
+          else if(o.hostile){ if(gap < 40) score -= (40 - gap) * (1.6 - ahead / 480); }
           else if(gap < 20) score += o.kind === 'repair' && S.hull < S.st.hullMax * 0.7 ? 30 : 12;
         }
         if(score > bestScore){ bestScore = score; best = cx; }
@@ -786,6 +899,7 @@ function assign(crew, people, prefer){
 }
 
 var MC = {W: W, H: H, SHIP_Y: SHIP_Y, SHIP_R: SHIP_R, PX_PER_KM: PX_PER_KM, SPACE_KM: SPACE_KM,
+          ATM_PX_PER_KM: ATM_PX_PER_KM, STAGE_KM: STAGE_KM, MAXQ: MAXQ, MAXQ_V: MAXQ_V, altPx: altPx,
           SECTOR_KM: SECTOR_KM, STATIONS: STATIONS, SIDES: SIDES, UPGRADES: UPGRADES,
           COSTS: COSTS, MAX_LV: MAX_LV, PAINTS: PAINTS, difficultyAt: function(km){ return Math.max(0, km - SPACE_KM) / 600; },
           freshLevels: freshLevels, stats: stats, newRun: newRun, step: step, act: act,

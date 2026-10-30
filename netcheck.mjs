@@ -152,6 +152,17 @@ try {
   ok(await until(() => Sh.evaluate(() => /BLOCKED/.test($('flareMsg').textContent))), 'turning to it says it is blocked');
   await until(() => tv.evaluate(() => !G.S.flare), 8000);
 
+  // staging: the thrusters phone gets the button, nobody else can press it
+  await tv.evaluate(() => { G.S.alt = 44.9; G.S.v = 120; G.S.staged = false; G.S.stageDue = false; G.S.objs.length = 0; });
+  ok(await until(() => T.evaluate(() => $('stageBtn').classList.contains('show'))), 'the booster runs dry and the thrusters phone shows STAGE');
+  await P.evaluate(() => tx({t: 'act', a: {t: 'stage'}}));
+  await sleep(300);
+  ok(await tv.evaluate(() => !G.S.staged), 'the pilot cannot stage');
+  await T.click('#stageBtn');
+  ok(await until(() => tv.evaluate(() => G.S.staged)), 'the thrusters officer can');
+  ok(await until(() => T.evaluate(() => !$('stageBtn').classList.contains('show'))), 'and the button goes away');
+  ok(await until(() => P.evaluate(() => parseFloat($('pHeat').style.width) >= 0 && $('pFuel').style.width !== '')), 'the pilot sees the engine heat and fuel');
+
   // a phone that reloads gets its seat back
   await Gp.reload();
   ok(await until(() => Gp.evaluate(() => !!conn && st === 'gunner'), 8000), 'the gunner reloads and is the gunner again');

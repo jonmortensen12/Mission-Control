@@ -109,6 +109,9 @@
 
   /* pilot */
   #pilot { flex-direction:column; }
+  .pgauges { display:flex; gap:10px; flex:0 0 auto; }
+  .pgauges .gauge { flex:1 1 0; }
+  #pilot .warn { flex:0 0 auto; }
   #stick { flex:1 1 auto; background: radial-gradient(circle at 50% 50%, #13203d, #0b1224); border-radius:18px; position:relative; overflow:hidden; border:2px solid #1d2b4b; }
   #stick .rail { position:absolute; left:8%; right:8%; top:50%; height:6px; margin-top:-3px; background:#22304f; border-radius:3px; }
   #knob { position:absolute; top:50%; left:50%; width:96px; height:96px; margin:-48px 0 0 -48px; border-radius:50%;
@@ -123,6 +126,9 @@
   #thrVal { position:absolute; left:0; right:0; top:42%; text-align:center; font-size:34px; font-weight:800; text-shadow:0 2px 6px #000; }
   #boostBtn { flex:1 1 auto; background:#0277bd; color:#fff; font-size:30px; font-weight:900; letter-spacing:2px; min-height:90px; }
   #boostBtn.cool { background:#1d2b4b; color:#6b7a93; }
+  #stageBtn { display:none; flex:1 1 auto; background:#ff3d00; color:#fff; font-size:30px; font-weight:900; letter-spacing:2px; min-height:90px;
+    animation: blink .35s steps(2) infinite; }
+  #stageBtn.show { display:block; }
   #speed { font-size:22px; font-weight:800; text-align:center; }
 
   /* gunner */
@@ -195,7 +201,12 @@
     </div>
 
     <div id="pilot" class="panel">
-      <div id="stick"><div class="rail"></div><div id="knob"></div><div class="lbl">Drag left and right to steer - grab green fuel, red repairs and blue batteries</div></div>
+      <div class="pgauges">
+        <div class="gauge"><i id="pHeat" style="background:#ffab40"></i><span>ENGINE HEAT</span></div>
+        <div class="gauge"><i id="pFuel" style="background:#69f0ae"></i><span>FUEL</span></div>
+      </div>
+      <div class="warn" id="pilotWarn"></div>
+      <div id="stick"><div class="rail"></div><div id="knob"></div><div class="lbl">Drag to steer. Swerving burns fuel and heats the engines - fly smooth</div></div>
     </div>
 
     <div id="thrusters" class="panel">
@@ -207,6 +218,7 @@
         <div class="gauge"><i id="gHeat" style="background:#ffab40"></i><span>ENGINE HEAT</span></div>
         <div class="gauge"><i id="gFuel" style="background:#69f0ae"></i><span>FUEL</span></div>
         <div class="warn" id="thrWarn"></div>
+        <button id="stageBtn">STAGE</button>
         <button id="boostBtn">BOOST</button>
         <div class="hint">Above the red line the engines heat up. Too hot and they stall.</div>
       </div>
@@ -380,6 +392,8 @@ function onHost(d){
     else if(d.k === 'dead') buzz([200, 80, 300]);
     else if(d.k === 'flare') buzz(st === 'shields' ? [100, 60, 100, 60, 100] : [60, 60, 60]);
     else if(d.k === 'boss') buzz([300, 100, 300]);
+    else if(d.k === 'stage') buzz([80, 50, 80, 50, 80]);
+    else if(d.k === 'maxq') buzz([150, 80, 150]);
     else if(d.k === 'win') buzz([50, 50, 50, 50, 200]);
   }
 }
@@ -404,6 +418,7 @@ function paint(){
   else if(S.flare && S.flare.warn && st !== 'shields') note('SOLAR FLARE - TELL SHIELDS: ' + SIDE_WORD[S.flare.side] + '!');
   else if(/^(LAUNCH|SOLAR)/.test($('note').textContent)) note('');
   if(st === 'thrusters') paintThr();
+  if(st === 'pilot') paintPilot();
   if(st === 'gunner') paintGun();
   if(st === 'shields') paintShields();
 }
@@ -580,13 +595,27 @@ drag($('throttle'), e => {
   push();
 });
 $('boostBtn').addEventListener('pointerdown', e => { e.preventDefault(); tx({t:'act', a:{t:'boost'}}); buzz(40); });
+$('stageBtn').addEventListener('pointerdown', e => { e.preventDefault(); tx({t:'act', a:{t:'stage'}}); buzz([60, 40, 120]); });
+function paintPilot(){
+  if(S.heat == null) return;
+  pct('pHeat', S.heat / 100);
+  pct('pFuel', S.fuel / S.fuelMax);
+  $('pilotWarn').textContent = S.stall ? 'ENGINES STALLED - STEERING WEAK' : S.heat > 80 ? 'ENGINES HOT - STEER GENTLY' :
+                               S.fuel < S.fuelMax * 0.15 ? 'FUEL LOW - FIND A GREEN CAN' : '';
+}
 function pct(id, f){ $(id).style.width = Math.max(0, Math.min(100, f * 100)) + '%'; }
 function paintThr(){
   if(S.heat == null) return;
   pct('gHeat', S.heat / 100);
   pct('gFuel', S.fuel / S.fuelMax);
   $('speed').textContent = (Math.round(S.v / 5) / 10) + ' km/s';
-  $('thrWarn').textContent = S.stall ? 'ENGINES STALLED - COOLING' : S.heat > 80 ? 'TOO HOT - THROTTLE DOWN' :
+  $('stageBtn').classList.toggle('show', !!S.stageDue);
+  $('thrWarn').textContent = S.stageDue ? 'BOOSTER EMPTY - HIT STAGE!' :
+                             S.stall ? (S.atm ? 'ENGINES STALLED - FALLING!' : 'ENGINES STALLED - COOLING') :
+                             S.stress > 0 ? 'MAX-Q - TOO FAST, THROTTLE DOWN!' :
+                             S.q && S.q > 0.85 ? 'MAX-Q - CAREFUL WITH SPEED' :
+                             S.heat > 80 ? 'TOO HOT - THROTTLE DOWN' :
+                             S.atm && S.thr < 0.5 ? 'TOO LOW - GRAVITY IS WINNING' :
                              S.fuel <= 0 ? 'OUT OF FUEL' : S.fuel < S.fuelMax * 0.2 ? 'FUEL LOW' : '';
   $('boostBtn').classList.toggle('cool', !!S.boost || !!S.stall);
   $('boostBtn').textContent = S.boost ? 'BOOST ' + Math.ceil(S.boost) : 'BOOST';

@@ -176,7 +176,7 @@ function onPhone(p, d){
     // a station only works its own controls
     const a = d.a;
     if((a.t === 'side' || a.t === 'pip') && st !== 'shields') return;
-    if(a.t === 'boost' && st !== 'thrusters') return;
+    if((a.t === 'boost' || a.t === 'stage') && st !== 'thrusters') return;
     MC.act(S, a);
   } else if(d.t === 'pick'){
     if(STATIONS.indexOf(d.st) < 0) return;
@@ -223,6 +223,8 @@ function broadcast(){
       km: Math.floor(S.maxAlt), v: Math.round(S.v), sector: S.sector.name,
       ammo: S.pips.w > 0,
       flare: S.flare ? {side: S.flare.side, warn: S.flare.warn > 0} : null,
+      atm: S.alt < SPACE_KM, stageDue: S.stageDue && !S.staged, stress: +S.stress.toFixed(2),
+      q: S.alt > MC.MAXQ[0] - 3 && S.alt < MC.MAXQ[1] ? +(S.v / MC.MAXQ_V).toFixed(2) : null,
       boss: S.boss ? Math.round(100 * S.boss.hp / S.boss.maxHp) : null
     });
   }
@@ -369,7 +371,24 @@ function onEvent(e){
       sendTo('shields', {t: 'fx', k: 'block'});
       break;
     case 'boom': boom(e.x, e.y, e.r, e.kind); break;
-    case 'zap': sparks(e.x, e.y, '#fff59d', 4); break;
+    case 'zap':
+      if(e.bolt){ BOLTS.push({x0: e.from.x, y0: e.from.y + 30, x1: e.x, y1: e.y, t: 0.3}); sfx('thunder'); G.flash = Math.max(G.flash, 0.3); }
+      else sparks(e.x, e.y, '#fff59d', 4);
+      break;
+    case 'gust': sfx('gust'); break;
+    case 'stagedue':
+      banner('BOOSTER EMPTY — STAGE!', 'Thrusters: hit STAGE to drop the booster');
+      sfx('alarm'); sendTo('thrusters', {t: 'fx', k: 'stage'});
+      break;
+    case 'staged':
+      sfx('stage'); G.shake = 10;
+      [-1, 1].forEach(sd => particles.push({x: e.x + sd * 36, y: SHIP_Y + 10, vx: sd * 60, vy: 120, life: 3, max: 3, booster: true, rot: 0, spin: sd * 0.8}));
+      banner('STAGE SEPARATION', '');
+      break;
+    case 'maxq':
+      banner('MAX-Q!', 'Too fast in the thick air - Thrusters, throttle down!');
+      sfx('alarm'); sendTo('thrusters', {t: 'fx', k: 'maxq'});
+      break;
     case 'shot': sfx('shot'); break;
     case 'eshot': sfx('eshot'); break;
     case 'pickup':
@@ -497,6 +516,9 @@ function sfx(k){
     case 'nope': tone(160, 0.15, 'square', 0.1); break;
     case 'alarm': [0, 1, 2].forEach(i => setTimeout(() => tone(880, 0.16, 'square', 0.12, 660), i * 260)); break;
     case 'flare': noise(2.4, 0.35, 3000); break;
+    case 'thunder': noise(0.9, 0.6, 500); tone(70, 0.6, 'sawtooth', 0.12, 35); break;
+    case 'gust': noise(1.0, 0.18, 900); break;
+    case 'stage': noise(0.5, 0.6, 1600); tone(140, 0.3, 'square', 0.12, 60); break;
   }
 }
 
@@ -652,7 +674,7 @@ function draw(el){
 }
 
 function drawWorld(S){
-  const alt = S.alt, scroll = alt * PX_PER_KM;
+  const alt = S.alt, scroll = MC.altPx(alt);
   g.fillStyle = skyAt(alt);
   g.fillRect(-20, -20, W + 40, H + 40);
   // the storm tints everything
@@ -677,7 +699,7 @@ function drawWorld(S){
   if(groundY < H + 200) drawGround(groundY);
   // the family record, as a line across the sky
   if(SAVE.record > 0){
-    const ry = SHIP_Y - (SAVE.record - alt) * PX_PER_KM;
+    const ry = SHIP_Y - (MC.altPx(SAVE.record) - scroll);
     if(ry > -10 && ry < H + 10){
       g.strokeStyle = '#ffd54f'; g.setLineDash([18, 12]); g.lineWidth = 3;
       g.beginPath(); g.moveTo(0, ry); g.lineTo(W, ry); g.stroke(); g.setLineDash([]);
@@ -685,7 +707,9 @@ function drawWorld(S){
       g.fillText('FAMILY RECORD  ' + Math.floor(SAVE.record) + ' km', 20, ry - 10);
     }
   }
+  if(S.alt < SPACE_KM && S.lifted) drawWind(S);
   S.objs.forEach(drawObj);
+  drawLightning();
   // our bolts and theirs
   g.lineCap = 'round';
   S.bolts.forEach(b => {
@@ -727,6 +751,43 @@ function drawFlare(S){
                side === 'L' ? g.createLinearGradient(0, 0, S.x, 0) : g.createLinearGradient(W, 0, S.x, 0);
     gr.addColorStop(0, 'rgba(255,255,220,' + a + ')'); gr.addColorStop(1, 'rgba(255,145,0,0)');
     g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  }
+}
+
+/* Wind: streaks across the sky, thicker and faster in a gust and in the
+   jet stream, so the pilot can see what is shoving the ship. */
+const WIND = [];
+for(let i = 0; i < 40; i++) WIND.push({x: Math.random() * W, y: Math.random() * H, l: 40 + Math.random() * 90});
+function drawWind(S){
+  const push = S.gust + (S.alt > 8 && S.alt < 14 ? 110 : 0);
+  const k = Math.min(1, Math.abs(push) / 250);
+  if(k < 0.08) return;
+  const dir = push > 0 ? 1 : -1;
+  g.strokeStyle = 'rgba(255,255,255,' + (0.15 + 0.35 * k) + ')'; g.lineWidth = 2;
+  WIND.forEach(w => {
+    w.x += dir * (300 + 900 * k) / 60;
+    if(w.x > W + 100) w.x = -100; if(w.x < -100) w.x = W + 100;
+    g.beginPath(); g.moveTo(w.x, w.y); g.lineTo(w.x - dir * w.l * (0.5 + k), w.y); g.stroke();
+  });
+  if(S.alt > 8 && S.alt < 14){
+    g.fillStyle = 'rgba(255,255,255,0.85)'; g.font = 'bold 20px system-ui'; g.textAlign = 'center';
+    g.fillText('JET STREAM →', W / 2, 200);
+  }
+}
+/* Lightning: a jagged line from the cloud to the ship, for a few frames. */
+const BOLTS = [];
+function drawLightning(){
+  for(let i = BOLTS.length - 1; i >= 0; i--){
+    const b = BOLTS[i];
+    b.t -= 1 / 60;
+    if(b.t <= 0){ BOLTS.splice(i, 1); continue; }
+    g.strokeStyle = 'rgba(255,255,200,' + Math.min(1, b.t * 6) + ')'; g.lineWidth = 4;
+    g.beginPath(); g.moveTo(b.x0, b.y0);
+    for(let k = 1; k < 8; k++){
+      const f = k / 8;
+      g.lineTo(b.x0 + (b.x1 - b.x0) * f + (Math.random() - 0.5) * 50, b.y0 + (b.y1 - b.y0) * f + (Math.random() - 0.5) * 30);
+    }
+    g.lineTo(b.x1, b.y1); g.stroke();
   }
 }
 
@@ -844,6 +905,15 @@ function drawObj(o){
       g.fillStyle = '#e53935'; g.fillRect(-4, -13, 8, 26); g.fillRect(-13, -4, 26, 8);
       break;
     }
+    case 'storm': {
+      const dark = 0.55 + 0.1 * Math.sin(clock * 2 + o.id);
+      g.fillStyle = 'rgba(40,44,60,' + dark + ')';
+      [[-60, 10, 50], [-20, -15, 60], [30, -5, 58], [70, 15, 44], [0, 25, 55]].forEach(c => {
+        g.beginPath(); g.arc(c[0], c[1], c[2], 0, 6.283); g.fill();
+      });
+      if(o.zapT < 0.25){ g.fillStyle = 'rgba(255,255,180,0.35)'; g.beginPath(); g.arc(0, 0, 100, 0, 6.283); g.fill(); }
+      break;
+    }
     case 'mother': {
       const hurt = o.hp < o.maxHp * 0.4;
       g.fillStyle = '#311b92';
@@ -892,6 +962,13 @@ function drawObj(o){
 function drawParticles(){
   particles.forEach(p => {
     const a = Math.max(0, p.life / p.max);
+    if(p.booster){
+      p.rot += p.spin / 60; p.vy += 4;
+      g.save(); g.translate(p.x, p.y); g.rotate(p.rot); g.globalAlpha = Math.min(1, a * 2);
+      g.fillStyle = '#eceff1'; g.fillRect(-9, -36, 18, 64);
+      g.fillStyle = '#c62828'; g.beginPath(); g.moveTo(-9, -36); g.lineTo(0, -52); g.lineTo(9, -36); g.fill();
+      g.restore(); g.globalAlpha = 1; return;
+    }
     if(p.text){ g.globalAlpha = a; g.fillStyle = p.col; g.font = 'bold 24px system-ui'; g.textAlign = 'center'; g.fillText(p.text, p.x, p.y); }
     else if(p.ring){ g.globalAlpha = a; g.strokeStyle = p.col; g.lineWidth = 4; g.beginPath(); g.arc(p.x, p.y, p.r * (1 - a) + 8, 0, 6.283); g.stroke(); }
     else { g.globalAlpha = a * (p.smoke ? 0.7 : 1); g.fillStyle = p.col; g.beginPath(); g.arc(p.x, p.y, p.r * (p.smoke ? 2 - a : 1), 0, 6.283); g.fill(); }
@@ -921,6 +998,19 @@ function drawShip(x, y, lv, S, sc){
     });
   }
   const paint = paintOf(SAVE.paint);
+  // the strap-on boosters, until they are dropped
+  if(S && !S.staged){
+    [-1, 1].forEach(sd => {
+      const bx = sd * (w + 10);
+      if(!(S.stall > 0) && !S.stageDue){
+        const fl = (14 + thr * 30) * (0.85 + Math.random() * 0.3);
+        g.fillStyle = '#ff9100'; g.beginPath(); g.moveTo(bx - 6, len * 0.55); g.lineTo(bx, len * 0.55 + fl); g.lineTo(bx + 6, len * 0.55); g.fill();
+      }
+      g.fillStyle = S.stageDue && Math.floor(clock * 6) % 2 ? '#ff5252' : '#eceff1';
+      g.fillRect(bx - 9, -len * 0.3, 18, len * 0.85);
+      g.fillStyle = '#c62828'; g.beginPath(); g.moveTo(bx - 9, -len * 0.3); g.lineTo(bx, -len * 0.3 - 16); g.lineTo(bx + 9, -len * 0.3); g.fill();
+    });
+  }
   // fins
   g.fillStyle = paint.fin;
   g.beginPath(); g.moveTo(-w, len * 0.2); g.lineTo(-w - 14 - lv.hull * 2, len * 0.62); g.lineTo(-w, len * 0.55); g.fill();
@@ -1021,7 +1111,15 @@ function drawHudInner(S){
 
   // speed, right of gauges
   g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = 'bold 22px system-ui';
-  g.fillText(Math.round(S.v / PX_PER_KM * 10) / 10 + ' km/s', x + 340, H - 22);
+  g.fillText(Math.round(S.v / (S.alt < SPACE_KM ? MC.ATM_PX_PER_KM : PX_PER_KM) * 10) / 10 + ' km/s', x + 340, H - 22);
+  // Max-Q: a gauge while in the band, red when the hull is taking it
+  if(S.alt > MC.MAXQ[0] - 3 && S.alt < MC.MAXQ[1]){
+    const q = Math.min(1.4, S.v / MC.MAXQ_V);
+    g.fillStyle = 'rgba(5,10,25,0.6)'; g.fillRect(x + 336, y - 14, 220, 76);
+    g.fillStyle = '#fff'; g.font = 'bold 16px system-ui'; g.fillText('MAX-Q  air pressure', x + 346, y + 6);
+    bar(x + 346, y + 16, 200, 20, q / 1.4, S.stress > 0 ? '#ff1744' : q > 0.85 ? '#ffab40' : '#69f0ae', S.stress > 0 ? 'TOO FAST!' : 'OK', S.stress > 0);
+    g.strokeStyle = '#fff'; g.beginPath(); g.moveTo(x + 346 + 200 / 1.4, y + 14); g.lineTo(x + 346 + 200 / 1.4, y + 38); g.stroke();
+  }
 
   // the crew, bottom right
   const cx = W - 300, cy = H - 150;
@@ -1062,10 +1160,10 @@ function drawHudInner(S){
 /* The first few launches teach the crew, one station at a time, while the
    ship climbs through the easy part of the sky. */
 const TIPS = {
-  pilot: 'PILOT: drag on your phone to steer. Grab green fuel, red repairs and blue batteries.',
+  pilot: 'PILOT: drag to steer and fight the wind. Every swerve burns fuel and heats the engines - fly smooth.',
   shields: 'SHIELDS: turn the shield to where hits come from. Share the power between shields, lasers and engines.',
   gunner: 'GUNNER: touch the circle where you want to shoot. Hold to fire - but watch the laser heat.',
-  thrusters: 'THRUSTERS: keep the throttle up or gravity wins. Above the red line the engines overheat. BOOST to dodge.'
+  thrusters: 'THRUSTERS: keep the throttle up or gravity wins - but past the red line the engines overheat. STAGE when the booster runs dry.'
 };
 function drawTip(S){
   if(SAVE.runs >= 3 || S.alt > SPACE_KM + 20) return;

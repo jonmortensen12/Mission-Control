@@ -71,6 +71,62 @@ console.log('nobody at the controls');
   ok(S.phase === 'dead' && /Earth/.test(S.cause), 'throttle off in the atmosphere falls back to Earth (' + S.cause + ')');
 }
 
+console.log('the atmosphere');
+{
+  const fresh = MC.newRun(3, lvAll(0));
+  let tSpace = null;
+  while(fresh.phase === 'flight' && fresh.alt < MC.SPACE_KM && fresh.t < 300){
+    const inp = {}; MC.ai(fresh, ALL, inp, 1 / 60).forEach(a => MC.act(fresh, a)); MC.step(fresh, inp, 1 / 60);
+  }
+  tSpace = fresh.t;
+  ok(fresh.phase === 'flight' && tSpace > 55 && tSpace < 110, 'a fresh ship takes ' + Math.round(tSpace) + ' s to reach space (wants about a minute or more)');
+  ok(fresh.staged, 'the computer drops the booster on the way');
+
+  // never staging: half thrust from 45 km
+  const a = MC.newRun(4, lvAll(0)), b = MC.newRun(4, lvAll(0));
+  [a, b].forEach(S => { S.alt = 46; S.v = 120; S.lifted = true; });
+  MC.step(a, {thr: 0.74}, 1 / 60); MC.step(b, {thr: 0.74}, 1 / 60);
+  ok(a.stageDue && b.stageDue, 'passing 45 km asks for staging');
+  MC.act(b, {t: 'stage'});
+  for(let i = 0; i < 600; i++){ MC.step(a, {thr: 0.74}, 1 / 60); MC.step(b, {thr: 0.74}, 1 / 60); }
+  ok(b.staged && b.alt > a.alt + 3, 'a dropped booster climbs faster (' + Math.round(b.alt) + ' km vs ' + Math.round(a.alt) + ' km)');
+
+  // a stall low down is a fall back to Earth
+  const c = MC.newRun(5, lvAll(0));
+  c.alt = 2; c.v = 60; c.lifted = true; c.stall = 3; c.heat = 70;
+  for(let i = 0; i < 400 && c.phase === 'flight'; i++) MC.step(c, {thr: 0.74}, 1 / 60);
+  ok(c.phase === 'dead' && /Earth/.test(c.cause), 'overheating at 2 km drops the ship back to Earth');
+
+  // Max-Q
+  const q = MC.newRun(6, lvAll(0));
+  q.alt = 15; q.v = 330; q.lifted = true; q.staged = true;
+  const h0 = q.hull;
+  for(let i = 0; i < 60; i++){ q.objs.length = 0; MC.step(q, {thr: 1}, 1 / 60); }
+  ok(q.hull < h0 - 4, 'too fast through Max-Q tears at the hull (' + Math.round(h0 - q.hull) + ' in a second)');
+}
+
+console.log('pilot and thrusters share the engines');
+{
+  const calm = MC.newRun(8, lvAll(0)), wild = MC.newRun(8, lvAll(0));
+  [calm, wild].forEach(S => { S.alt = 300; S.v = 250; S.lifted = true; S.sector = {n: 1, at: 100, theme: 'drift', name: 'x'}; S.flareT = 1e9; });
+  for(let i = 0; i < 600; i++){
+    calm.objs.length = wild.objs.length = 0;
+    MC.step(calm, {thr: 0.7, px: 0}, 1 / 60);
+    MC.step(wild, {thr: 0.7, px: Math.floor(i / 30) % 2 ? 1 : -1}, 1 / 60);
+  }
+  ok(wild.fuel < calm.fuel - 5, 'swerving burns fuel (' + Math.round(calm.fuel - wild.fuel) + ' more in ten seconds)');
+  ok(wild.heat > calm.heat + 20, 'and heats the engines the thrusters officer is minding');
+}
+
+console.log('events from between ticks');
+{
+  const S = MC.newRun(9, lvAll(0));
+  MC.step(S, {}, 1 / 60);
+  MC.act(S, {t: 'side', s: 'L'});
+  MC.step(S, {}, 1 / 60);
+  ok(S.events.some(e => e.type === 'side'), 'turning the shield between ticks still makes its sound');
+}
+
 console.log('shields');
 {
   const S = MC.newRun(5, lvAll(0));
