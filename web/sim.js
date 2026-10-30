@@ -33,6 +33,17 @@ var UPGRADES = [
   {key:'reactor', name:'Reactor', station:'shields',   blurb:'One more power pip to share out per level'}
 ];
 var COSTS = [80, 180, 340, 560, 850];
+
+/* Paint jobs, unlocked by how far the family has ever flown. Cosmetic -
+   something to show for a record besides the number. */
+var PAINTS = [
+  {key: 'classic',  name: 'Classic',  km: 0,    body: ['#90a4ae', '#eceff1', '#78909c'], fin: '#c62828'},
+  {key: 'midnight', name: 'Midnight', km: 500,  body: ['#1a237e', '#5c6bc0', '#0d1442'], fin: '#ffd54f'},
+  {key: 'tiger',    name: 'Tiger',    km: 1000, body: ['#e65100', '#ffb74d', '#bf360c'], fin: '#212121'},
+  {key: 'mint',     name: 'Mint',     km: 1500, body: ['#00897b', '#a7ffeb', '#00695c'], fin: '#f06292'},
+  {key: 'gold',     name: 'Gold',     km: 2500, body: ['#b8860b', '#fff176', '#8d6e00'], fin: '#6d4c41'},
+  {key: 'ghost',    name: 'Ghost',    km: 4000, body: ['#cfd8dc', '#ffffff', '#b0bec5'], fin: '#7c4dff'}
+];
 var MAX_LV = 5;
 
 function mulberry(seed){
@@ -84,10 +95,14 @@ function newRun(seed, lv){
     events: [],
     spawn: {},
     sector: {n: 0, name: 'Launch Pad', theme: 'earth', at: 0},
+    boss: null,            // the mothership, while there is one
+    flare: null,           // {side, warn, burn} - a solar flare on its way or burning
+    flareT: 40,            // seconds until the next one is due
     planet: null,
     zone: 'ground',
-    stats: {kills: 0, blocked: 0, pickups: 0, boosts: 0, gems: 0, hits: 0, killCr: 0},
-    ai: {pilot: {t: 0, px: 0}, gunner: {t: 0, target: null, a: 0}, shields: {t: 0}},
+    stats: {kills: 0, blocked: 0, pickups: 0, boosts: 0, gems: 0, hits: 0, killCr: 0,
+            bosses: 0, flares: 0, planets: []},
+    ai: {pilot: {t: 0, px: 0}, gunner: {t: 0, target: null, a: 0}, shields: {t: 0, flareSeen: 0}},
     nextId: 1
   };
   // spare reactor pips start in the shields
@@ -148,7 +163,9 @@ var THEMES = {
   flyby:  {ast: 0.8, ali: 0.8, pick: 1.6, words: ['Flyby']},
   storm:  {ast: 1.1, ali: 1.0, pick: 1.0, words: ['Ion Storm', 'Maelstrom', 'Static'], regen: 0.35},
   drift:  {ast: 0.45, ali: 0.4, pick: 2.0, words: ['Quiet', 'Reach', 'Expanse']},
-  nest:   {ast: 1.2, ali: 2.6, pick: 1.0, words: ['Hive', 'Nest', 'Swarm'], minD: 2.5}
+  nest:   {ast: 1.2, ali: 2.6, pick: 1.0, words: ['Hive', 'Nest', 'Swarm'], minD: 2.5},
+  // every third sector: a mothership, and little else while it lives
+  boss:   {ast: 0.3, ali: 0, pick: 1.4, words: ['Mothership']}
 };
 var NAMES = ['Kepler', 'Vega', 'Orion', 'Halcyon', 'Tycho', 'Nyx', 'Cobalt', 'Juno',
              'Sable', 'Ember', 'Hollow', 'Iris', 'Rook', 'Zephyr', 'Marrow', 'Lumen',
@@ -165,7 +182,12 @@ function planetName(r){
 function newSector(S){
   var r = S.rng, n = S.sector.n + 1, theme, name;
   if(n === 1){ theme = 'orbit'; name = 'Low Orbit'; }
-  else {
+  else if(n % 3 === 0){
+    theme = 'boss';
+    var bn = pick(r, NAMES);
+    name = 'The ' + bn + ' Mothership';
+    spawnBoss(S, bn);
+  } else {
     var d = difficulty(S), pool = ['belt', 'patrol', 'flyby', 'storm', 'drift'];
     if(d >= THEMES.nest.minD) pool.push('nest', 'nest');
     // a breather after a hard one, and never the same twice running
@@ -176,6 +198,7 @@ function newSector(S){
       S.planet = {name: pn, x: r() < 0.5 ? rr(r, 150, 420) : rr(r, 1180, 1450),
                   y: -420, r: rr(r, 220, 330), c1: cols[0], c2: cols[1], ring: r() < 0.5};
       name = 'Flyby of ' + pn;
+      S.stats.planets.push(pn);
     } else {
       name = pick(r, NAMES) + ' ' + pick(r, THEMES[theme].words);
     }
@@ -213,6 +236,48 @@ function asteroid(S, x, y, r, vx, vy, d){
   return spawnObj(S, {kind: 'rock', x: x, y: y, r: r, vx: vx, vy: vy,
     hp: Math.ceil(r / 9 * (1 + 0.25 * d)), dmg: Math.round(4 + r * 0.35),
     spin: rr(rng, -1.5, 1.5), rot: rr(rng, 0, 6.28), shape: shape, hostile: true, cr: 1});
+}
+
+/* The mothership. Parks across the top of the screen, sweeps side to side,
+   fires fans of shots, launches scouts and sends slow homing torpedoes the
+   gunner has to shoot down. While it lives the sector does not end; if it
+   is not destroyed in seventy seconds it leaves. */
+function spawnBoss(S, name){
+  var d = difficulty(S);
+  S.boss = spawnObj(S, {kind: 'mother', name: name, x: W / 2, y: -160, r: 92, ride: 0,
+    hp: Math.round(70 * (1 + 0.45 * d)), dmg: 45, hostile: true, alien: true, cr: 80,
+    volley: 3, launch: 5, torp: 7, leave: 70, boss: true});
+  emit(S, 'boss', {name: name});
+}
+
+/* A solar flare: three seconds of warning from one side, then a burn from
+   that side. The shield facing it takes it; anything else and the hull
+   does. It is the shields officer's moment, and the warning is for the
+   rest of the crew to shout. */
+function flareTick(S, dt){
+  var r = S.rng, d = difficulty(S);
+  if(!S.flare){
+    if(S.alt < SPACE_KM + 30 || S.boss) return;
+    S.flareT -= dt;
+    if(S.flareT > 0) return;
+    S.flareT = rr(r, 35, 60) / (1 + 0.15 * d);
+    S.flare = {side: pick(r, SIDES), warn: 3, burn: 2.4, tick: 0};
+    emit(S, 'flarewarn', {side: S.flare.side});
+    return;
+  }
+  var f = S.flare;
+  if(f.warn > 0){
+    f.warn -= dt;
+    if(f.warn <= 0){ emit(S, 'flare', {side: f.side}); S.stats.flares++; }
+    return;
+  }
+  f.burn -= dt; f.tick -= dt;
+  if(f.tick <= 0){
+    f.tick = 0.25;
+    var at = {F: [S.x, SHIP_Y - 200], B: [S.x, SHIP_Y + 200], L: [S.x - 200, SHIP_Y], R: [S.x + 200, SHIP_Y]}[f.side];
+    hurt(S, 3.5 * (1 + 0.2 * d), {x: at[0], y: at[1]}, 'a solar flare');
+  }
+  if(f.burn <= 0) S.flare = null;
 }
 
 function spawnTick(S, dt){
@@ -279,6 +344,8 @@ function spawnTick(S, dt){
     spawnObj(S, {kind: 'fuel', x: rr(r, 120, 1480), y: -40, r: 20, hostile: false});
   if(every('repair', 0.035 * th.pick))
     spawnObj(S, {kind: 'repair', x: rr(r, 120, 1480), y: -40, r: 20, hostile: false});
+  if(every('battery', 0.03 * th.pick))
+    spawnObj(S, {kind: 'battery', x: rr(r, 120, 1480), y: -40, r: 18, hostile: false});
   if(every('gem', 0.05 * th.pick))
     spawnObj(S, {kind: 'gem', x: rr(r, 120, 1480), y: -40, r: 16, hostile: false});
 }
@@ -306,9 +373,10 @@ function hurt(S, dmg, from, what){
   emit(S, left > 0 ? 'hit' : 'block', {side: side, dmg: left, blocked: blocked, x: from.x, y: from.y});
   if(S.hull <= 0 && S.phase === 'flight'){
     S.hull = 0;
-    die(S, what === 'bolt' ? 'Shot down' : what === 'rock' ? 'Hit by an asteroid' :
-           what === 'junk' ? 'Hit by space junk' :
-           what ? 'Destroyed by a ' + what : 'Destroyed');
+    var NICE = {bolt: 'Shot down', rock: 'Hit by an asteroid', junk: 'Hit by space junk',
+                mother: 'Rammed the mothership', torpedo: 'Hit by a torpedo', bird: 'Hit a bird',
+                plane: 'Hit a plane', balloon: 'Hit a weather balloon'};
+    die(S, NICE[what] || (/^a /.test(what) ? 'Burned by ' + what : what ? 'Destroyed by a ' + what : 'Destroyed'));
   }
 }
 
@@ -320,6 +388,11 @@ function die(S, cause){
 
 function kill(S, o){
   o.dead = true;
+  if(o.boss){
+    S.boss = null;
+    S.stats.bosses++;
+    emit(S, 'bossdown', {x: o.x, y: o.y, name: o.name});
+  }
   S.stats.kills++;
   S.stats.killCr += o.cr || 0;
   emit(S, 'boom', {x: o.x, y: o.y, r: o.r, kind: o.kind});
@@ -417,7 +490,9 @@ function step(S, inp, dt){
     S.zone = z;
     if(ZONE_NAMES[z]) emit(S, 'zone', {name: ZONE_NAMES[z], zone: z});
   }
-  if(S.alt >= SPACE_KM && (S.sector.n === 0 || S.alt - S.sector.at >= SECTOR_KM)) newSector(S);
+  if(S.alt >= SPACE_KM && !S.boss && (S.sector.n === 0 || S.alt - S.sector.at >= SECTOR_KM)) newSector(S);
+  flareTick(S, dt);
+  if(S.phase !== 'flight') return;
   if(S.planet){
     S.planet.y += S.v * 0.07 * dt;
     if(S.planet.y - S.planet.r > H + 50) S.planet = null;
@@ -428,6 +503,7 @@ function step(S, inp, dt){
   for(var i = 0; i < S.objs.length; i++){
     var o = S.objs[i];
     o.t += dt;
+    if(o.bump > 0) o.bump -= dt;
     if(o.kind === 'scout'){
       o.y += (S.v * 0.05 + 70) * dt;
       o.x += Math.sin(o.t * 1.6 + o.ph) * 160 * dt;
@@ -452,6 +528,41 @@ function step(S, inp, dt){
       if(o.lock > 0){ o.lock -= dt; o.vx = dx / dl * 60; o.vy = dy / dl * 60; }
       else if(!o.dashing){ o.dashing = true; o.vx = dx / dl * (420 + 40 * d); o.vy = dy / dl * (420 + 40 * d); }
       o.x += o.vx * dt; o.y += o.vy * dt;
+    } else if(o.kind === 'mother'){
+      o.y += (150 - o.y) * 0.8 * dt;
+      o.x = W / 2 + Math.sin(o.t * 0.35) * 480;
+      o.leave -= dt;
+      if(o.leave <= 0){ o.y -= 0; o.dead = true; S.boss = null; emit(S, 'bossgone', {name: o.name}); continue; }
+      if(o.y > 60){
+        o.volley -= dt; o.launch -= dt; o.torp -= dt;
+        var rage = o.hp < o.maxHp * 0.4 ? 1.5 : 1;
+        if(o.volley <= 0){
+          o.volley = rr(r, 2.2, 3.0) / rage / (1 + 0.1 * d);
+          var base = Math.atan2(S.x - o.x, SHIP_Y - o.y);
+          for(var v = -2; v <= 2; v++){
+            var aa = base + v * 0.22;
+            S.ebolts.push({x: o.x, y: o.y + 50, vx: Math.sin(aa) * (280 + 25 * d), vy: Math.cos(aa) * (280 + 25 * d),
+                           dmg: 7 * (1 + 0.2 * d), life: 4});
+          }
+          emit(S, 'eshot', {x: o.x, y: o.y});
+        }
+        if(o.launch <= 0){
+          o.launch = rr(r, 5, 7) / rage;
+          spawnObj(S, {kind: 'scout', x: o.x + rr(r, -60, 60), y: o.y + 40, r: 24, ride: 0,
+                       hp: Math.ceil(3 * (1 + 0.3 * d)), dmg: 12, hostile: true, alien: true, cr: 3,
+                       fire: rr(r, 1, 2), ph: rr(r, 0, 6)});
+        }
+        if(o.torp <= 0){
+          o.torp = rr(r, 6, 8) / rage;
+          spawnObj(S, {kind: 'torpedo', x: o.x, y: o.y + 60, r: 14, ride: 0, vx: 0, vy: 90,
+                       hp: 2, dmg: 22 * (1 + 0.15 * d), hostile: true, cr: 2});
+        }
+      }
+    } else if(o.kind === 'torpedo'){
+      var tx2 = S.x - o.x, ty2 = SHIP_Y - o.y, tl = Math.hypot(tx2, ty2) || 1, sp = 170 + 12 * d;
+      o.vx += (tx2 / tl * sp - o.vx) * 1.2 * dt;
+      o.vy += (ty2 / tl * sp - o.vy) * 1.2 * dt;
+      o.x += o.vx * dt; o.y += o.vy * dt;
     } else if(o.kind === 'chaser'){
       var cdx = S.x - o.x;
       o.vx += clamp(cdx * 2, -500, 500) * dt;
@@ -463,12 +574,16 @@ function step(S, inp, dt){
       o.y += (S.v * o.ride + o.vy) * dt;
       if(o.spin) o.rot += o.spin * dt;
     }
-    if(o.y > H + 140 || o.y < -260 || o.x < -260 || o.x > W + 260 || o.t > 60) o.dead = true;
+    if(o.y > H + 140 || o.y < -260 || o.x < -260 || o.x > W + 260 || (o.t > 60 && !o.boss)) o.dead = true;
     if(o.dead) continue;
     // touching the ship
     var cr = o.r + SHIP_R * 0.8;
     if(Math.abs(o.x - S.x) < cr && Math.abs(o.y - SHIP_Y) < cr &&
        Math.hypot(o.x - S.x, o.y - SHIP_Y) < cr){
+      if(o.boss){
+        if(!(o.bump > 0)){ o.bump = 1; hurt(S, o.dmg, o, 'mother'); if(S.phase !== 'flight') return; }
+        continue;
+      }
       o.dead = true;
       if(o.hostile){
         emit(S, 'boom', {x: o.x, y: o.y, r: o.r, kind: o.kind, crash: true});
@@ -527,6 +642,7 @@ function pickup(S, o){
   if(o.kind === 'fuel') S.fuel = Math.min(S.st.fuelMax, S.fuel + 35);
   else if(o.kind === 'repair') S.hull = Math.min(S.st.hullMax, S.hull + 22);
   else if(o.kind === 'gem') S.stats.gems++;
+  else if(o.kind === 'battery'){ S.E = S.st.Emax; S.gun.heat = 0; S.gun.over = false; S.heat = Math.max(0, S.heat - 40); }
   emit(S, 'pickup', {kind: o.kind, x: o.x, y: o.y});
 }
 
@@ -580,7 +696,7 @@ function ai(S, auto, inp, dt){
       for(var k = 0; k < S.objs.length; k++){
         var q = S.objs[k];
         if(!q.hostile || q.y < -20) continue;
-        var dd = Math.hypot(q.x - S.x, q.y - SHIP_Y) - (q.alien ? 150 : 0);
+        var dd = Math.hypot(q.x - S.x, q.y - SHIP_Y) - (q.alien ? 150 : 0) - (q.kind === 'torpedo' ? 400 : 0);
         if(dd < bd && dd < 650){ bd = dd; tgt = q; }
       }
       G.target = tgt;
@@ -600,6 +716,14 @@ function ai(S, auto, inp, dt){
 
   if(auto.shields){
     A.shields.t -= dt;
+    // a flare: the computer gets there, a little late
+    if(S.flare){
+      A.shields.flareSeen += dt;
+      if(A.shields.flareSeen > 1.6){
+        if(S.side !== S.flare.side) acts.push({t: 'side', s: S.flare.side});
+        return acts;
+      }
+    } else A.shields.flareSeen = 0;
     if(A.shields.t <= 0){
       A.shields.t = 0.55;
       var worst = null, wt = 1e9;
@@ -663,7 +787,7 @@ function assign(crew, people, prefer){
 
 var MC = {W: W, H: H, SHIP_Y: SHIP_Y, SHIP_R: SHIP_R, PX_PER_KM: PX_PER_KM, SPACE_KM: SPACE_KM,
           SECTOR_KM: SECTOR_KM, STATIONS: STATIONS, SIDES: SIDES, UPGRADES: UPGRADES,
-          COSTS: COSTS, MAX_LV: MAX_LV,
+          COSTS: COSTS, MAX_LV: MAX_LV, PAINTS: PAINTS, difficultyAt: function(km){ return Math.max(0, km - SPACE_KM) / 600; },
           freshLevels: freshLevels, stats: stats, newRun: newRun, step: step, act: act,
           ai: ai, credits: credits, difficulty: difficulty, cost: cost, buy: buy,
           assign: assign, sideOf: sideOf, mulberry: mulberry};

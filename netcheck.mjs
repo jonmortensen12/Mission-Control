@@ -130,6 +130,28 @@ try {
   await sleep(300);
   ok(await tv.evaluate(() => G.S.side === 'L'), 'thrusters cannot move the shield');
 
+  // pause from any phone, resume from another
+  await P.click('#pauseBtn');
+  ok(await until(() => tv.evaluate(() => G.paused)), 'a phone pauses the game');
+  const t0 = await tv.evaluate(() => G.S.t);
+  await sleep(500);
+  ok(await tv.evaluate(t0 => G.S.t === t0, t0), 'and the ship stops');
+  ok(await until(() => Sh.evaluate(() => $('paused').classList.contains('on'))), 'every phone shows PAUSED');
+  await Sh.click('#resumeBtn');
+  ok(await until(() => tv.evaluate(() => !G.paused)), 'another phone resumes it');
+
+  // a solar flare: the shields phone is told which way to turn
+  await tv.evaluate(() => { G.S.alt = Math.max(G.S.alt, 200); G.S.flareT = 0.01; G.S.side = 'F'; });
+  ok(await until(() => tv.evaluate(() => !!G.S.flare)), 'a flare is coming');
+  const fside = await tv.evaluate(() => G.S.flare.side);
+  if(fside !== 'F'){
+    ok(await until(() => Sh.evaluate(s => document.querySelector('.sideBtn[data-s="' + s + '"]').classList.contains('flare'), fside)), 'the shields phone flashes the side to turn to');
+    ok(await until(() => T.evaluate(() => /SOLAR FLARE/.test($('note').textContent))), 'and the other phones are told to shout');
+  }
+  await Sh.click('.sideBtn[data-s="' + fside + '"]');
+  ok(await until(() => Sh.evaluate(() => /BLOCKED/.test($('flareMsg').textContent))), 'turning to it says it is blocked');
+  await until(() => tv.evaluate(() => !G.S.flare), 8000);
+
   // a phone that reloads gets its seat back
   await Gp.reload();
   ok(await until(() => Gp.evaluate(() => !!conn && st === 'gunner'), 8000), 'the gunner reloads and is the gunner again');
@@ -145,7 +167,15 @@ try {
   await P.click('#contBtn');
   ok(await until(() => tv.evaluate(() => G.phase === 'hangar')), 'CONTINUE goes back to the hangar');
 
-  await tv.evaluate(() => { SAVE.credits = 1000; });
+  await tv.evaluate(() => { SAVE.credits = 1000; SAVE.record = 600; });
+  await sleep(250);
+  ok(await until(() => Sh.evaluate(() => !document.querySelector('.paint[data-k="midnight"]').disabled && document.querySelector('.paint[data-k="tiger"]').disabled)),
+     'paint jobs unlock with the record');
+  await Sh.click('.paint[data-k="midnight"]');
+  ok(await until(() => tv.evaluate(() => SAVE.paint === 'midnight')), 'a phone picks the Midnight paint');
+  await Sh.evaluate(() => tx({t: 'paint', key: 'ghost'}));
+  await sleep(250);
+  ok(await tv.evaluate(() => SAVE.paint === 'midnight'), 'a locked paint cannot be picked');
   await sleep(250);
   await Sh.click('.item[data-k="shield"] button');
   ok(await until(() => tv.evaluate(() => SAVE.lv.shield === 1 && SAVE.credits === 1000 - MC.COSTS[0])), 'a phone buys a shield upgrade');

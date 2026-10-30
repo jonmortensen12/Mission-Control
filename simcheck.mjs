@@ -90,6 +90,53 @@ console.log('shields');
   ok(S.hull === h2, 'and is blocked once the shield is turned left');
 }
 
+console.log('the mothership');
+{
+  // fly a maxed ship until sector 3, where the first one waits
+  const S = MC.newRun(31337, lvAll(5));
+  let met = null, sectorWhileBoss = null, down = false;
+  while(S.phase === 'flight' && S.t < 900){
+    const inp = {};
+    MC.ai(S, ALL, inp, 1 / 60).forEach(a => MC.act(S, a));
+    MC.step(S, inp, 1 / 60);
+    S.events.forEach(e => {
+      if(e.type === 'boss' && met === null) met = S.sector.n;
+      if(e.type === 'bossdown') down = true;
+    });
+    if(S.boss && sectorWhileBoss === null) sectorWhileBoss = S.sector.n;
+    if(S.boss && S.alt - S.sector.at > MC.SECTOR_KM + 50 && S.sector.n !== sectorWhileBoss) sectorWhileBoss = -1;
+    if(down) break;
+  }
+  ok(met === 3, 'the first mothership is sector 3 (met in ' + met + ')');
+  ok(sectorWhileBoss === 3, 'the sector does not move on while it lives');
+  ok(down && S.stats.bosses === 1 && S.stats.killCr >= 80, 'a maxed computer crew destroys it, for its bounty');
+  // and it is worth meeting: every third sector
+  const T = MC.newRun(7, lvAll(5));
+  T.alt = 100 + MC.SECTOR_KM * 5 + 1; T.sector = {n: 5, at: 100 + MC.SECTOR_KM * 4, theme: 'belt', name: 'x'};
+  MC.step(T, {}, 1 / 60);
+  ok(T.sector.n === 6 && T.boss && T.sector.theme === 'boss', 'sector 6 is a mothership too');
+}
+
+console.log('solar flares');
+{
+  const S = MC.newRun(77, lvAll(0));
+  S.alt = 300; S.v = 250; S.lifted = true; S.sector = {n: 1, at: 100, theme: 'drift', name: 'x'};
+  S.flareT = 0.01;
+  MC.step(S, {thr: 0.6}, 1 / 60);
+  ok(S.flare && S.flare.warn > 2.9, 'a flare announces itself three seconds early');
+  const side = S.flare.side;
+  S.side = side; S.hull = 50;
+  const h = S.hull;
+  for(let i = 0; i < 60 * 6; i++){ S.objs.length = 0; S.ebolts.length = 0; S.E = S.st.Emax; MC.step(S, {thr: 0.6}, 1 / 60); }
+  ok(S.hull === h && S.stats.flares === 1, 'facing it with the shield takes none of it');
+  const T = MC.newRun(77, lvAll(0));
+  T.alt = 300; T.v = 250; T.lifted = true; T.sector = {n: 1, at: 100, theme: 'drift', name: 'x'}; T.flareT = 0.01;
+  MC.step(T, {thr: 0.6}, 1 / 60);
+  T.side = MC.SIDES.find(x => x !== T.flare.side); T.hull = 50;
+  for(let i = 0; i < 60 * 6; i++){ T.objs.length = 0; T.ebolts.length = 0; MC.step(T, {thr: 0.6}, 1 / 60); }
+  ok(T.hull < 50 - 20, 'facing anywhere else burns the hull (' + Math.round(50 - T.hull) + ' damage)');
+}
+
 console.log('power');
 {
   const S = MC.newRun(6, lvAll(0));

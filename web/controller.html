@@ -38,6 +38,21 @@
   #hullMini { width:110px; height:14px; background:#2a1010; border-radius:7px; overflow:hidden; flex:0 0 auto; }
   #hullMini i { display:block; height:100%; width:100%; background:#ef5350; }
   #dot { width:12px; height:12px; border-radius:50%; background:#69f0ae; flex:0 0 auto; }
+  #pauseBtn { background:#1d2b4b; padding:6px 12px; font-weight:800; font-size:15px; display:none; }
+  #pauseBtn.show { display:inline-block; }
+  #paused { position:fixed; inset:0; background:rgba(6,10,24,.92); z-index:8; display:none; flex-direction:column;
+    align-items:center; justify-content:center; gap:18px; }
+  #paused.on { display:flex; }
+  #paused b { font-size:44px; letter-spacing:3px; }
+  #resumeBtn { background:#2e7d32; color:#fff; padding:18px 48px; font-size:24px; font-weight:800; }
+  .paints { display:flex; gap:8px; overflow-x:auto; padding-bottom:4px; }
+  .paint { flex:0 0 auto; width:86px; padding:8px 6px; background:var(--panel); border:2px solid transparent; border-radius:12px; font-size:13px; text-align:center; }
+  .paint i { display:block; height:26px; border-radius:6px; margin-bottom:4px; }
+  .paint.on { border-color:#fff; }
+  .paint:disabled { opacity:.4; }
+  .sideBtn.flare { background:#ff3d00 !important; color:#fff; border-color:#ffab40; animation: blink .25s steps(2) infinite; }
+  @keyframes blink { 50% { opacity:.55; } }
+  #flareMsg { text-align:center; color:#ff6e40; font-weight:900; font-size:20px; min-height:1.3em; letter-spacing:1px; }
   #dot.off { background:#ff5252; }
   #note { position:fixed; left:0; right:0; top:50px; text-align:center; pointer-events:none; z-index:5; }
   #note span { display:inline-block; background:rgba(255,82,82,.92); color:#fff; padding:6px 14px; border-radius:999px; font-weight:700; }
@@ -151,13 +166,16 @@
 </div>
 
 <div id="game" class="screen">
-  <div id="top"><span id="chip">CREW</span><span id="who"></span><span id="hullMini"><i></i></span><span id="dot"></span></div>
+  <div id="top"><span id="chip">CREW</span><span id="who"></span><button id="pauseBtn">II</button><span id="hullMini"><i></i></span><span id="dot"></span></div>
+  <div id="paused"><b>PAUSED</b><button id="resumeBtn">RESUME</button></div>
   <div id="note"></div>
   <div id="body">
 
     <div id="hangar" class="panel">
       <h2>YOUR STATION <span style="font-weight:400">- tap one to take it</span></h2>
       <div class="seats" id="seats"></div>
+      <h2>PAINT <span style="font-weight:400">- unlocked by the family record</span></h2>
+      <div class="paints" id="paints"></div>
       <h2>UPGRADES <span id="credits"></span></h2>
       <div class="shop" id="shop"></div>
       <button id="readyBtn">READY</button>
@@ -168,11 +186,12 @@
       <div class="km" id="rKm"></div>
       <div class="rec" id="rRec"></div>
       <div class="earn" id="rEarn"></div>
+      <div class="why" id="rMvp" style="color:#ffd54f;font-weight:700"></div>
       <button id="contBtn">CONTINUE</button>
     </div>
 
     <div id="pilot" class="panel">
-      <div id="stick"><div class="rail"></div><div id="knob"></div><div class="lbl">Drag left and right to steer - grab green fuel and red repairs</div></div>
+      <div id="stick"><div class="rail"></div><div id="knob"></div><div class="lbl">Drag left and right to steer - grab green fuel, red repairs and blue batteries</div></div>
     </div>
 
     <div id="thrusters" class="panel">
@@ -208,6 +227,7 @@
         <svg id="shipIco" viewBox="0 0 36 70"><path d="M18 2 C30 20 30 40 28 56 L8 56 C6 40 6 20 18 2Z" fill="#cfd8dc"/><path d="M8 40 L1 62 L8 56Z M28 40 L35 62 L28 56Z" fill="#c62828"/><circle cx="18" cy="22" r="5" fill="#4fc3f7"/></svg>
       </div>
       <div class="col" id="power">
+        <div id="flareMsg"></div>
         <div class="gauge"><i id="gShield" style="background:#4dd0e1"></i><span>SHIELD ENERGY</span></div>
         <div class="prow" data-k="s"><button data-d="-1">-</button><b style="color:#4dd0e1">SHIELDS</b><div class="pp"></div><button data-d="1">+</button></div>
         <div class="prow" data-k="w"><button data-d="-1">-</button><b style="color:#ff6e6e">LASERS</b><div class="pp"></div><button data-d="1">+</button></div>
@@ -354,6 +374,9 @@ function onHost(d){
     else if(d.k === 'stall') buzz([120, 60, 120]);
     else if(d.k === 'gunhot') buzz([30, 40, 30]);
     else if(d.k === 'dead') buzz([200, 80, 300]);
+    else if(d.k === 'flare') buzz(st === 'shields' ? [100, 60, 100, 60, 100] : [60, 60, 60]);
+    else if(d.k === 'boss') buzz([300, 100, 300]);
+    else if(d.k === 'win') buzz([50, 50, 50, 50, 200]);
   }
 }
 
@@ -364,6 +387,9 @@ function paint(){
   document.documentElement.style.setProperty('--col', st ? COLS[st] : '#8a9ab3');
   $('chip').textContent = st ? NAMES[st] : 'NO SEAT';
   $('who').textContent = myName;
+  const flying = S.ph === 'flight';
+  $('pauseBtn').classList.toggle('show', flying);
+  $('paused').classList.toggle('on', flying && !!S.paused);
   if(S.hullMax) $('hullMini').firstChild.style.width = (100 * S.hull / S.hullMax) + '%';
   const ph = S.ph;
   if(ph === 'hangar' || !ph){ panel('hangar'); paintHangar(); return; }
@@ -371,7 +397,8 @@ function paint(){
   if(!st){ panel('hangar'); paintHangar(); return; }
   panel(st);
   if(ph === 'count') note('LAUNCH IN ' + S.cd);
-  else if($('note').textContent.indexOf('LAUNCH') === 0) note('');
+  else if(S.flare && S.flare.warn && st !== 'shields') note('SOLAR FLARE - TELL SHIELDS: ' + SIDE_WORD[S.flare.side] + '!');
+  else if(/^(LAUNCH|SOLAR)/.test($('note').textContent)) note('');
   if(st === 'thrusters') paintThr();
   if(st === 'gunner') paintGun();
   if(st === 'shields') paintShields();
@@ -417,9 +444,28 @@ function buildShop(){
     box.appendChild(row);
   });
 }
+function buildPaints(){
+  const box = $('paints');
+  box.innerHTML = '';
+  MC.PAINTS.forEach(pt => {
+    const b = document.createElement('button');
+    b.className = 'paint'; b.dataset.k = pt.key;
+    b.innerHTML = '<i></i><span></span>';
+    b.firstChild.style.background = 'linear-gradient(90deg,' + pt.body[0] + ',' + pt.body[1] + ' 45%,' + pt.body[2] + ' 80%,' + pt.fin + ' 80%)';
+    b.addEventListener('click', () => { tx({t:'paint', key: pt.key}); buzz(10); });
+    box.appendChild(b);
+  });
+}
 function paintHangar(){
   if(!$('seats').children.length) buildSeats();
   if(!$('shop').children.length) buildShop();
+  if(!$('paints').children.length) buildPaints();
+  document.querySelectorAll('.paint').forEach(b => {
+    const pt = MC.PAINTS.find(x => x.key === b.dataset.k), open = (S.record || 0) >= pt.km;
+    b.disabled = !open;
+    b.classList.toggle('on', S.paint === pt.key);
+    b.lastChild.textContent = open ? pt.name : pt.km.toLocaleString() + ' km';
+  });
   paintSeats();
   $('credits').textContent = '- ' + (S.credits || 0) + ' credits';
   document.querySelectorAll('.item').forEach(row => {
@@ -444,9 +490,12 @@ function paintResults(){
   $('rWhy').textContent = L.cause;
   $('rKm').textContent = L.km.toLocaleString() + ' km';
   $('rRec').textContent = L.newRecord ? 'NEW FAMILY RECORD!' : 'Record: ' + (S.record || 0).toLocaleString() + ' km';
-  $('rEarn').textContent = '+' + L.earned + ' credits';
+  $('rEarn').textContent = '+' + L.earned + ' credits' + (L.newPaints && L.newPaints.length ? ' - new paint: ' + L.newPaints.join(', ') : '');
+  $('rMvp').textContent = L.mvp ? '★ ' + (L.crew[L.mvp] || '') + ' saved the ship' : '';
 }
 $('contBtn').addEventListener('click', () => tx({t:'ready', v: true}));
+$('pauseBtn').addEventListener('click', () => tx({t:'pause', v: true}));
+$('resumeBtn').addEventListener('click', () => tx({t:'pause', v: false}));
 
 /* ---------- input: one object, sent when it changes ---------- */
 let inp = {t:'in'}, sentAt = 0, dirty = false;
@@ -570,8 +619,14 @@ document.querySelectorAll('.prow button').forEach(b => b.addEventListener('point
   tx({t:'act', a:{t:'pip', sys: b.parentNode.dataset.k, d: +b.dataset.d}});
   buzz(10);
 }));
+const SIDE_WORD = {F:'THE FRONT', B:'BEHIND', L:'THE LEFT', R:'THE RIGHT'};
 function paintShields(){
-  document.querySelectorAll('.sideBtn').forEach(b => b.classList.toggle('on', b.dataset.s === S.side));
+  const fl = S.flare;
+  document.querySelectorAll('.sideBtn').forEach(b => {
+    b.classList.toggle('on', b.dataset.s === S.side);
+    b.classList.toggle('flare', !!(fl && fl.side === b.dataset.s && S.side !== fl.side));
+  });
+  $('flareMsg').textContent = fl ? (S.side === fl.side ? 'FLARE BLOCKED - HOLD IT' : 'SOLAR FLARE FROM ' + SIDE_WORD[fl.side] + '!') : '';
   if(S.Emax) pct('gShield', S.E / S.Emax);
   if(!S.pips) return;
   let used = 0;

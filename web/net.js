@@ -18,6 +18,34 @@ var PEER_CDNS = ['https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js',
                  'https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js'];
 var STUN = [{urls: 'stun:stun.cloudflare.com:3478'}, {urls: 'stun:stun.l.google.com:19302'}];
 
+/* The relay pass, from the Worker's /relay (see worker.js). Kept and reused
+   while it has four hours left. A slow or missing pass never holds up a
+   join: after 2.5 seconds the attempt goes ahead without it, which is
+   exactly how it connects with no relay at all. */
+var relayNone = false;
+function peerOpts(cb){
+  var done = false;
+  function go(ice){
+    if(done) return;
+    done = true;
+    cb({pingInterval: 4000, config: {iceServers: STUN.concat(ice || [])}});
+  }
+  if(relayNone || typeof fetch !== 'function' || !/^https?:$/.test(location.protocol)) return go(null);
+  try {
+    var kept = JSON.parse(localStorage.getItem('mctl_relay') || 'null');
+    if(kept && kept.ice && kept.exp - Date.now() > 4 * 3600e3) return go(kept.ice);
+  } catch(e){}
+  setTimeout(function(){ go(null); }, 2500);
+  fetch('relay', {cache: 'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(j){
+      if(j && j.iceServers && j.iceServers.length){
+        try { localStorage.setItem('mctl_relay', JSON.stringify({ice: j.iceServers, exp: j.exp})); } catch(e){}
+        go(j.iceServers);
+      } else { relayNone = true; go(null); }
+    }, function(){ go(null); });
+}
+
 function isLocal(){ return /(^|[?&])local=1(&|$)/.test(location.search); }
 
 function webrtcHere(){
@@ -116,8 +144,8 @@ function joinLocal(code, h){
 var FATAL = ['browser-incompatible', 'invalid-id', 'invalid-key', 'ssl-unavailable',
              'server-error', 'socket-error', 'socket-closed'];
 
-function hostPeer(code, h){
-  var peer = new root.Peer(PREFIX + code, {pingInterval: 4000, config: {iceServers: STUN}});
+function hostPeer(code, opts, h){
+  var peer = new root.Peer(PREFIX + code, opts);
   var opened = false;
   var timer = setTimeout(function(){
     if(!opened){ try { peer.destroy(); } catch(e){} h.error('The room did not finish opening. Check this screen has internet.'); }
@@ -133,8 +161,8 @@ function hostPeer(code, h){
   return {destroy: function(){ clearTimeout(timer); try { peer.destroy(); } catch(e){} }};
 }
 
-function joinPeer(code, h){
-  var peer = new root.Peer({pingInterval: 4000, config: {iceServers: STUN}}), done = false;
+function joinPeer(code, opts, h){
+  var peer = new root.Peer(opts), done = false;
   var timer = setTimeout(function(){ if(!done){ done = true; try { peer.destroy(); } catch(e){} h.error('timeout'); } }, 15000);
   peer.on('open', function(){
     var conn = peer.connect(PREFIX + code, {reliable: true});
@@ -158,12 +186,14 @@ function host(h){
   var handle = {destroy: function(){ if(handle.inner) handle.inner.destroy(); }};
   loadPeer(function(err){
     if(err) return h.error(err);
-    (function attempt(){
-      handle.inner = hostPeer(code, {
-        open: function(){ h.open(code); }, conn: h.conn,
-        error: function(m){ if(m === 'taken'){ code = codeGen(); attempt(); } else h.error(m); }
-      });
-    })();
+    peerOpts(function(opts){
+      (function attempt(){
+        handle.inner = hostPeer(code, opts, {
+          open: function(){ h.open(code); }, conn: h.conn,
+          error: function(m){ if(m === 'taken'){ code = codeGen(); attempt(); } else h.error(m); }
+        });
+      })();
+    });
   });
   return handle;
 }
@@ -175,7 +205,7 @@ function join(code, h){
   var handle = {destroy: function(){ if(handle.inner) handle.inner.destroy(); }};
   loadPeer(function(err){
     if(err) return h.error('library');
-    handle.inner = joinPeer(code, h);
+    peerOpts(function(opts){ handle.inner = joinPeer(code, opts, h); });
   });
   return handle;
 }

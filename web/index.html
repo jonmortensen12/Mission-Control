@@ -46,12 +46,15 @@ function loadSave(){
   try {
     const s = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null');
     if(s && s.lv) return {credits: s.credits | 0, lv: Object.assign(MC.freshLevels(), s.lv),
-                          record: +s.record || 0, runs: s.runs | 0};
+                          record: +s.record || 0, runs: s.runs | 0, paint: s.paint || 'classic',
+                          bosses: s.bosses | 0, planets: Array.isArray(s.planets) ? s.planets.slice(0, 200) : []};
   } catch(e){}
-  return {credits: 0, lv: MC.freshLevels(), record: 0, runs: 0};
+  return {credits: 0, lv: MC.freshLevels(), record: 0, runs: 0, paint: 'classic', bosses: 0, planets: []};
 }
 function storeSave(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(SAVE)); } catch(e){} }
 let SAVE = loadSave();
+function paintOf(key){ return MC.PAINTS.find(p => p.key === key) || MC.PAINTS[0]; }
+function unlocked(p){ return SAVE.record >= p.km; }
 
 /* ---------- the game state around a run ---------- */
 const G = {
@@ -64,7 +67,9 @@ const G = {
   keys: {},
   shake: 0,
   banner: null,          // {text, sub, t}
-  flash: 0
+  flash: 0,
+  paused: false,
+  tip: 0                 // which first-launch tip is showing
 };
 
 /* ---------- the room ---------- */
@@ -179,6 +184,11 @@ function onPhone(p, d){
   } else if(d.t === 'ready'){
     if(G.phase === 'hangar'){ p.ready = !!d.v; sfx('click'); }
     else if(G.phase === 'dead' && G.deadT > 2) toHangar();
+  } else if(d.t === 'paint'){
+    const pt = MC.PAINTS.find(x => x.key === d.key);
+    if(pt && unlocked(pt) && G.phase === 'hangar'){ SAVE.paint = pt.key; storeSave(); sfx('click'); }
+  } else if(d.t === 'pause'){
+    if(G.phase === 'flight'){ G.paused = !!d.v; sfx('click'); }
   } else if(d.t === 'name'){
     p.name = cleanName(d.name) || p.name;
   }
@@ -194,7 +204,7 @@ function broadcast(){
     crew[s] = p ? {name: p.name, on: !!p.conn, ready: !!p.ready} : null;
   });
   const m = {t: 's', ph: G.phase, crew, credits: SAVE.credits, lv: SAVE.lv, record: Math.floor(SAVE.record),
-             cd: Math.ceil(G.countT)};
+             cd: Math.ceil(G.countT), paint: SAVE.paint, paused: G.paused};
   if(S){
     Object.assign(m, {
       hull: Math.round(S.hull), hullMax: S.st.hullMax, E: Math.round(S.E), Emax: S.st.Emax,
@@ -202,7 +212,9 @@ function broadcast(){
       fuel: Math.round(S.fuel), fuelMax: S.st.fuelMax, thr: +S.thr.toFixed(2), boost: S.boostCd > 0 ? +S.boostCd.toFixed(1) : 0,
       gheat: Math.round(S.gun.heat), gover: S.gun.over, ga: +S.gun.a.toFixed(2),
       km: Math.floor(S.maxAlt), v: Math.round(S.v), sector: S.sector.name,
-      ammo: S.pips.w > 0
+      ammo: S.pips.w > 0,
+      flare: S.flare ? {side: S.flare.side, warn: S.flare.warn > 0} : null,
+      boss: S.boss ? Math.round(100 * S.boss.hp / S.boss.maxHp) : null
     });
   }
   if(G.last) m.last = G.last;
@@ -217,6 +229,7 @@ function launch(){
   G.countT = 3.999;
   G.last = null;
   G.keyHeld = false;
+  G.paused = false;
   particles.length = 0;
   Object.values(NET.people).forEach(p => { p.ready = false; });
   sfx('count');
@@ -235,13 +248,26 @@ function endRun(){
   SAVE.credits += earned;
   SAVE.runs++;
   if(newRecord) SAVE.record = S.maxAlt;
+  SAVE.bosses += S.stats.bosses;
+  S.stats.planets.forEach(n => { if(SAVE.planets.indexOf(n) < 0) SAVE.planets.push(n); });
+  const newPaints = MC.PAINTS.filter(p => p.km > prev && p.km <= SAVE.record).map(p => p.name);
   storeSave();
   const crewNames = {};
   STATIONS.forEach(s => { const p = G.crew[s] && NET.people[G.crew[s]]; crewNames[s] = p ? p.name : null; });
   G.last = {km: Math.floor(S.maxAlt), earned, cause: S.cause, newRecord, prev: Math.floor(prev),
-            sector: S.sector.name, time: Math.round(S.t), stats: Object.assign({}, S.stats), crew: crewNames};
+            sector: S.sector.name, time: Math.round(S.t), stats: Object.assign({}, S.stats), crew: crewNames,
+            newPaints, mvp: mvpOf(S.stats, crewNames)};
   G.phase = 'dead';
   G.deadT = 0;
+}
+
+/* Who saved the ship: the station whose work counted most this run, by a
+   rough exchange rate between what each station can do. */
+function mvpOf(st, crew){
+  const score = {pilot: st.pickups * 12, shields: st.blocked * 0.6, gunner: st.kills * 4 + st.bosses * 60, thrusters: st.boosts * 10};
+  let best = null;
+  STATIONS.forEach(s => { if(crew[s] && (best === null || score[s] > score[best])) best = s; });
+  return best && score[best] > 0 ? best : null;
 }
 
 /* The inputs for one tick: people where there are people, the computer
@@ -283,6 +309,7 @@ function tick(){
   lastT = now;
   acc += el;
   while(acc >= DT){ update(DT); acc -= DT; }
+  if(!muted){ musicTick(); engineTick(); }
   sendT -= el;
   if(sendT <= 0){ sendT = 0.1; broadcast(); sweep(); }
   draw(el);
@@ -305,6 +332,7 @@ function update(dt){
     // idle the engines on the pad so the flame is lit at liftoff
     if(G.countT <= 0){ G.phase = 'flight'; sfx('liftoff'); banner('LIFTOFF!', ''); }
   } else if(G.phase === 'flight'){
+    if(G.paused) return;
     const S = G.S;
     const inp = gatherInputs(dt);
     MC.step(S, inp, dt);
@@ -338,7 +366,7 @@ function onEvent(e){
     case 'pickup':
       sfx('pickup');
       sparks(e.x, e.y, e.kind === 'fuel' ? '#69f0ae' : e.kind === 'repair' ? '#ff8a80' : '#e1bee7', 18);
-      floater(e.x, e.y - 20, e.kind === 'fuel' ? '+FUEL' : e.kind === 'repair' ? '+HULL' : '+8 CREDITS');
+      floater(e.x, e.y - 20, {fuel: '+FUEL', repair: '+HULL', battery: 'FULL POWER!', gem: '+8 CREDITS'}[e.kind] || '');
       break;
     case 'stall': sfx('stall'); banner('ENGINES OVERHEATED', 'Thrusters: ease off the throttle!'); sendTo('thrusters', {t: 'fx', k: 'stall'}); break;
     case 'restart': sfx('liftoff'); break;
@@ -348,12 +376,28 @@ function onEvent(e){
     case 'side': sfx('side'); break;
     case 'zone': banner(e.name, e.zone === 'space' ? 'You made it to space. Now keep going.' : ''); if(e.zone === 'space') sfx('fanfare'); break;
     case 'sector': if(e.n > 1){ banner('SECTOR ' + e.n, e.name); sfx('sector'); } else banner('SECTOR 1', e.name); break;
+    case 'flarewarn':
+      banner('SOLAR FLARE — ' + SIDE_NAME[e.side] + '!', 'Shields: turn to the ' + SIDE_NAME[e.side].toLowerCase() + '!');
+      sfx('alarm'); everyone({t: 'fx', k: 'flare', side: e.side});
+      break;
+    case 'flare': sfx('flare'); break;
+    case 'boss':
+      banner('MOTHERSHIP!', 'The ' + e.name + ' Mothership. Shoot down the torpedoes!');
+      sfx('alarm'); everyone({t: 'fx', k: 'boss'});
+      break;
+    case 'bossdown':
+      banner('MOTHERSHIP DESTROYED!', '+40 credits');
+      for(let i = 0; i < 6; i++) setTimeout(() => boom(e.x + (Math.random() - 0.5) * 160, e.y + (Math.random() - 0.5) * 80, 70, 'ship'), i * 140);
+      G.shake = 16; sfx('fanfare'); everyone({t: 'fx', k: 'win'});
+      break;
+    case 'bossgone': banner('THE MOTHERSHIP ESCAPED', 'It will be back.'); break;
     case 'dead':
       sfx('dead'); boom(S.x, SHIP_Y, 90, 'ship'); boom(S.x - 30, SHIP_Y + 20, 60, 'ship'); G.shake = 20;
       everyone({t: 'fx', k: 'dead'});
       break;
   }
 }
+const SIDE_NAME = {F: 'FRONT', B: 'BEHIND', L: 'LEFT', R: 'RIGHT'};
 function sendTo(st, m){ const p = G.crew[st] && NET.people[G.crew[st]]; send(p, m); }
 
 /* ---------- particles ---------- */
@@ -442,7 +486,94 @@ function sfx(k){
     case 'click': tone(700, 0.04, 'square', 0.06); break;
     case 'buy': tone(784, 0.08, 'square', 0.1); setTimeout(() => tone(1175, 0.15, 'square', 0.1), 80); break;
     case 'nope': tone(160, 0.15, 'square', 0.1); break;
+    case 'alarm': [0, 1, 2].forEach(i => setTimeout(() => tone(880, 0.16, 'square', 0.12, 660), i * 260)); break;
+    case 'flare': noise(2.4, 0.35, 3000); break;
   }
+}
+
+/* ---------- music: a four-chord loop, written as it plays ----------
+   Am F C G. The hangar gets a slow arpeggio; the flight adds bass and, in
+   space, drums; it speeds up the further out you are; a mothership gets
+   its own harder version. Scheduled a little ahead on the audio clock so
+   it keeps time however the page is painting. */
+const CHORDS = [[57, 60, 64], [53, 57, 60], [48, 52, 55], [55, 59, 62]];   // MIDI
+const midi = n => 440 * Math.pow(2, (n - 69) / 12);
+const MUSIC = {next: 0, step: 0, gain: null};
+function note(f, t, d, type, vol){
+  const o = AC.createOscillator(), gn = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + 0.01);
+  gn.gain.exponentialRampToValueAtTime(0.0001, t + d);
+  o.connect(gn); gn.connect(MUSIC.gain); o.start(t); o.stop(t + d + 0.05);
+}
+function hat(t, vol){
+  const len = Math.floor(AC.sampleRate * 0.05), buf = AC.createBuffer(1, len, AC.sampleRate), ch = buf.getChannelData(0);
+  for(let i = 0; i < len; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / len);
+  const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
+  src.buffer = buf; f.type = 'highpass'; f.frequency.value = 6000; gn.gain.value = vol;
+  src.connect(f); f.connect(gn); gn.connect(MUSIC.gain); src.start(t);
+}
+function kick(t){
+  const o = AC.createOscillator(), gn = AC.createGain();
+  o.frequency.setValueAtTime(140, t); o.frequency.exponentialRampToValueAtTime(40, t + 0.15);
+  gn.gain.setValueAtTime(0.5, t); gn.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+  o.connect(gn); gn.connect(MUSIC.gain); o.start(t); o.stop(t + 0.25);
+}
+function musicMode(){
+  if(G.phase === 'hangar') return 'hangar';
+  if(G.phase === 'dead' || G.paused) return 'quiet';
+  if(G.S && G.S.boss) return 'boss';
+  return G.S && G.S.alt >= SPACE_KM ? 'space' : 'climb';
+}
+function musicTick(){
+  if(!AC || AC.state !== 'running') return;
+  if(!MUSIC.gain){ MUSIC.gain = AC.createGain(); MUSIC.gain.gain.value = 0.55; MUSIC.gain.connect(master); }
+  const mode = musicMode();
+  const d = G.S ? MC.difficulty(G.S) : 0;
+  const bpm = mode === 'hangar' ? 84 : mode === 'boss' ? 150 : mode === 'climb' ? 104 : 112 + Math.min(24, d * 8);
+  const spb = 60 / bpm / 4;
+  if(MUSIC.next < AC.currentTime) MUSIC.next = AC.currentTime + 0.05;
+  while(MUSIC.next < AC.currentTime + 0.2){
+    const t = MUSIC.next, st = MUSIC.step % 16, ch = CHORDS[Math.floor(MUSIC.step / 16) % 4];
+    if(mode !== 'quiet'){
+      if(mode === 'hangar'){
+        if(st % 4 === 0) note(midi(ch[(st / 4) % 3] + 12), t, spb * 6, 'triangle', 0.06);
+        if(st === 0) note(midi(ch[0] - 12), t, spb * 16, 'sine', 0.08);
+      } else {
+        const arp = mode === 'boss' ? [0, 1, 2, 1] : [0, 1, 2, 1, 2, 1];
+        if(st % 2 === 0) note(midi(ch[arp[(st / 2) % arp.length]] + 12), t, spb * 1.6, mode === 'boss' ? 'sawtooth' : 'square', mode === 'boss' ? 0.035 : 0.025);
+        if(mode === 'boss' ? st % 2 === 0 : st % 4 === 0) note(midi(ch[0] - 24), t, spb * 1.8, 'sawtooth', 0.07);
+        if(mode !== 'climb'){
+          if(st % 8 === 0 || (mode === 'boss' && st % 4 === 0)) kick(t);
+          if(st % 2 === 1) hat(t, 0.05);
+        }
+      }
+    }
+    MUSIC.next += spb;
+    MUSIC.step++;
+  }
+}
+
+/* The engines: a low rumble that follows the throttle, louder on a boost,
+   silent when they stall, and thinner in the vacuum. */
+let ENGINE = null;
+function engineTick(){
+  if(!AC || AC.state !== 'running') return;
+  if(!ENGINE){
+    const len = AC.sampleRate * 2, buf = AC.createBuffer(1, len, AC.sampleRate), ch = buf.getChannelData(0);
+    let last = 0;
+    for(let i = 0; i < len; i++){ last = (last + 0.04 * (Math.random() * 2 - 1)) / 1.04; ch[i] = last * 3.5; }
+    const src = AC.createBufferSource(), f = AC.createBiquadFilter(), gn = AC.createGain();
+    src.buffer = buf; src.loop = true; f.type = 'lowpass'; f.frequency.value = 300; gn.gain.value = 0;
+    src.connect(f); f.connect(gn); gn.connect(master); src.start();
+    ENGINE = {f, gn};
+  }
+  const S = G.S, on = S && (G.phase === 'flight' || G.phase === 'count') && !G.paused && S.stall <= 0;
+  const thr = on ? (G.phase === 'count' ? 0.25 : S.thr) : 0, boost = on && S.boostT > 0;
+  const vac = S && S.alt >= SPACE_KM ? 0.45 : 1;
+  const want = on ? (0.12 + 0.35 * thr + (boost ? 0.35 : 0)) * vac : 0;
+  ENGINE.gn.gain.setTargetAtTime(want, AC.currentTime, 0.08);
+  ENGINE.f.frequency.setTargetAtTime(200 + 500 * thr + (boost ? 600 : 0), AC.currentTime, 0.1);
 }
 function unlockAudio(){ const a = audio(); if(a && a.state === 'suspended') a.resume(); }
 addEventListener('pointerdown', unlockAudio);
@@ -457,7 +588,8 @@ addEventListener('keydown', e => {
     else if(G.phase === 'dead' && G.deadT > 1.5) toHangar();
     e.preventDefault();
   }
-  if(e.key === 'm' || e.key === 'M') muted = !muted;
+  if(e.key === 'm' || e.key === 'M'){ muted = !muted; if(master) master.gain.value = muted ? 0 : 0.35; }
+  if((e.key === 'p' || e.key === 'P' || e.key === 'Escape') && G.phase === 'flight') G.paused = !G.paused;
   if(e.key === 'f' || e.key === 'F'){ try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch(err){} }
 });
 addEventListener('keyup', e => { G.keys[e.key] = false; });
@@ -503,6 +635,7 @@ function draw(el){
     drawWorld(S);
     drawHud(S);
     if(G.phase === 'count') drawCount();
+    if(G.paused && G.phase === 'flight') drawPause();
     if(G.phase === 'dead') drawResults();
   }
   g.restore();
@@ -555,8 +688,37 @@ function drawWorld(S){
     g.fillStyle = '#fff'; g.beginPath(); g.arc(b.x, b.y, 3, 0, 6.283); g.fill();
   });
   drawParticles();
+  if(S.flare) drawFlare(S);
   if(S.phase === 'flight' || G.phase === 'count') drawShip(S.x, SHIP_Y, S.lv, S, 1);
   if(G.flash > 0){ g.fillStyle = 'rgba(255,40,40,' + (G.flash * 0.25) + ')'; g.fillRect(0, 0, W, H); }
+}
+
+/* A flare: arrows and a red edge while it is coming, then a white-hot wash
+   from that side while it burns. */
+function drawFlare(S){
+  const f = S.flare, side = f.side;
+  const blink = Math.floor(clock * 6) % 2;
+  const edge = {F: [0, 0, W, 140], B: [0, H - 140, W, 140], L: [0, 0, 160, H], R: [W - 160, 0, 160, H]}[side];
+  if(f.warn > 0){
+    const gr = side === 'F' ? g.createLinearGradient(0, 0, 0, 140) : side === 'B' ? g.createLinearGradient(0, H, 0, H - 140) :
+               side === 'L' ? g.createLinearGradient(0, 0, 160, 0) : g.createLinearGradient(W, 0, W - 160, 0);
+    gr.addColorStop(0, 'rgba(255,61,0,' + (blink ? 0.7 : 0.35) + ')'); gr.addColorStop(1, 'rgba(255,61,0,0)');
+    g.fillStyle = gr; g.fillRect(edge[0], edge[1], edge[2], edge[3]);
+    // an arrow at the ship pointing where it comes from
+    const ang = {F: -Math.PI / 2, R: 0, B: Math.PI / 2, L: Math.PI}[side];
+    g.save(); g.translate(S.x + Math.cos(ang) * 120, SHIP_Y + Math.sin(ang) * 120); g.rotate(ang + Math.PI);
+    g.fillStyle = blink ? '#ff3d00' : '#ffab40';
+    g.beginPath(); g.moveTo(30, 0); g.lineTo(-10, -22); g.lineTo(-10, 22); g.closePath(); g.fill();
+    g.restore();
+    g.fillStyle = '#fff'; g.font = 'bold 40px system-ui'; g.textAlign = 'center';
+    g.fillText(Math.ceil(f.warn), S.x + Math.cos(ang) * 190, SHIP_Y + Math.sin(ang) * 190 + 14);
+  } else {
+    const a = 0.35 + 0.25 * Math.random();
+    const gr = side === 'F' ? g.createLinearGradient(0, 0, 0, SHIP_Y) : side === 'B' ? g.createLinearGradient(0, H, 0, SHIP_Y) :
+               side === 'L' ? g.createLinearGradient(0, 0, S.x, 0) : g.createLinearGradient(W, 0, S.x, 0);
+    gr.addColorStop(0, 'rgba(255,255,220,' + a + ')'); gr.addColorStop(1, 'rgba(255,145,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  }
 }
 
 const FAR = [];
@@ -673,6 +835,36 @@ function drawObj(o){
       g.fillStyle = '#e53935'; g.fillRect(-4, -13, 8, 26); g.fillRect(-13, -4, 26, 8);
       break;
     }
+    case 'mother': {
+      const hurt = o.hp < o.maxHp * 0.4;
+      g.fillStyle = '#311b92';
+      g.beginPath(); g.ellipse(0, 10, 150, 42, 0, 0, 6.283); g.fill();
+      g.fillStyle = hurt ? '#d50000' : '#7c4dff';
+      g.beginPath(); g.ellipse(0, 0, 120, 30, 0, 0, 6.283); g.fill();
+      g.fillStyle = '#b388ff'; g.beginPath(); g.arc(0, -12, 48, Math.PI, 0); g.fill();
+      g.fillStyle = 'rgba(255,255,255,0.35)'; g.beginPath(); g.arc(-14, -30, 14, 0, 6.283); g.fill();
+      for(let i = -4; i <= 4; i++){
+        g.fillStyle = Math.floor(clock * 6 + i) % 3 ? '#ffea00' : '#ff1744';
+        g.beginPath(); g.arc(i * 30, 22, 6, 0, 6.283); g.fill();
+      }
+      g.fillStyle = '#212121'; g.fillRect(-12, 40, 24, 22);
+      break;
+    }
+    case 'torpedo': {
+      g.rotate(Math.atan2(o.vy, o.vx) - Math.PI / 2);
+      g.fillStyle = '#ff6d00'; g.beginPath(); g.ellipse(0, 0, 9, 18, 0, 0, 6.283); g.fill();
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(0, 12, 5, 0, 6.283); g.fill();
+      g.fillStyle = 'rgba(255,214,0,' + (0.5 + 0.5 * Math.sin(clock * 20)) + ')';
+      g.beginPath(); g.moveTo(-6, -16); g.lineTo(0, -30 - Math.random() * 10); g.lineTo(6, -16); g.fill();
+      break;
+    }
+    case 'battery': {
+      g.fillStyle = '#00b8d4'; g.strokeStyle = '#e0f7fa'; g.lineWidth = 3;
+      g.beginPath(); g.roundRect(-12, -16, 24, 32, 4); g.fill(); g.stroke();
+      g.fillStyle = '#e0f7fa'; g.fillRect(-5, -21, 10, 5);
+      g.fillStyle = '#ffeb3b'; g.beginPath(); g.moveTo(3, -10); g.lineTo(-5, 2); g.lineTo(0, 2); g.lineTo(-3, 11); g.lineTo(5, -1); g.lineTo(0, -1); g.closePath(); g.fill();
+      break;
+    }
     case 'gem': {
       g.rotate(clock * 2);
       g.fillStyle = '#e040fb'; g.beginPath(); g.moveTo(0, -16); g.lineTo(13, 0); g.lineTo(0, 16); g.lineTo(-13, 0); g.closePath(); g.fill();
@@ -682,7 +874,7 @@ function drawObj(o){
   }
   g.restore();
   // a damaged big thing shows how close it is
-  if(o.maxHp > 2 && o.hp < o.maxHp && o.alien){
+  if(o.maxHp > 2 && o.hp < o.maxHp && o.alien && !o.boss){
     g.fillStyle = '#300'; g.fillRect(o.x - 24, o.y - o.r - 14, 48, 5);
     g.fillStyle = '#ff5252'; g.fillRect(o.x - 24, o.y - o.r - 14, 48 * Math.max(0, o.hp / o.maxHp), 5);
   }
@@ -719,8 +911,9 @@ function drawShip(x, y, lv, S, sc){
       g.beginPath(); g.moveTo(nx - 4, len * 0.62); g.lineTo(nx, len * 0.62 + fl * 0.5); g.lineTo(nx + 4, len * 0.62); g.fill();
     });
   }
+  const paint = paintOf(SAVE.paint);
   // fins
-  g.fillStyle = '#c62828';
+  g.fillStyle = paint.fin;
   g.beginPath(); g.moveTo(-w, len * 0.2); g.lineTo(-w - 14 - lv.hull * 2, len * 0.62); g.lineTo(-w, len * 0.55); g.fill();
   g.beginPath(); g.moveTo(w, len * 0.2); g.lineTo(w + 14 + lv.hull * 2, len * 0.62); g.lineTo(w, len * 0.55); g.fill();
   // nozzles
@@ -728,7 +921,7 @@ function drawShip(x, y, lv, S, sc){
   nozzles.forEach(nx => g.fillRect(nx - 7, len * 0.5, 14, len * 0.13));
   // body
   const body = g.createLinearGradient(-w, 0, w, 0);
-  body.addColorStop(0, '#90a4ae'); body.addColorStop(0.45, '#eceff1'); body.addColorStop(1, '#78909c');
+  body.addColorStop(0, paint.body[0]); body.addColorStop(0.45, paint.body[1]); body.addColorStop(1, paint.body[2]);
   g.fillStyle = body;
   g.beginPath();
   g.moveTo(0, -len);
@@ -838,6 +1031,15 @@ function drawHudInner(S){
     g.fillText('Join: room ' + NET.code, W - 20, 30);
   }
 
+  if(S.boss){
+    const b = S.boss, bw = 700, bx = W / 2 - bw / 2;
+    g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillRect(bx, 104, bw, 22);
+    g.fillStyle = b.hp < b.maxHp * 0.4 ? '#ff1744' : '#b388ff'; g.fillRect(bx, 104, bw * Math.max(0, b.hp / b.maxHp), 22);
+    g.fillStyle = '#fff'; g.font = 'bold 15px system-ui'; g.textAlign = 'center';
+    g.fillText('THE ' + b.name.toUpperCase() + ' MOTHERSHIP  ·  leaves in ' + Math.ceil(b.leave) + 's', W / 2, 121);
+  }
+  drawTip(S);
+
   if(G.banner){
     const a = Math.min(1, G.banner.t * 2);
     g.globalAlpha = a; g.textAlign = 'center';
@@ -846,6 +1048,33 @@ function drawHudInner(S){
     if(G.banner.sub){ g.font = '30px system-ui, sans-serif'; g.fillStyle = '#b3e5fc'; g.fillText(G.banner.sub, W / 2, 346); }
     g.globalAlpha = 1;
   }
+}
+
+/* The first few launches teach the crew, one station at a time, while the
+   ship climbs through the easy part of the sky. */
+const TIPS = {
+  pilot: 'PILOT: drag on your phone to steer. Grab green fuel, red repairs and blue batteries.',
+  shields: 'SHIELDS: turn the shield to where hits come from. Share the power between shields, lasers and engines.',
+  gunner: 'GUNNER: touch the circle where you want to shoot. Hold to fire - but watch the laser heat.',
+  thrusters: 'THRUSTERS: keep the throttle up or gravity wins. Above the red line the engines overheat. BOOST to dodge.'
+};
+function drawTip(S){
+  if(SAVE.runs >= 3 || S.alt > SPACE_KM + 20) return;
+  const order = STATIONS.filter(s => G.crew[s] && NET.people[G.crew[s]]);
+  if(!order.length) return;
+  const s = order[Math.floor(S.t / 7) % order.length];
+  g.font = '22px system-ui'; g.textAlign = 'center';
+  const w = Math.min(W - 40, g.measureText(TIPS[s]).width + 40);
+  g.fillStyle = 'rgba(5,10,25,0.75)'; g.fillRect(W / 2 - w / 2, 150, w, 44);
+  g.fillStyle = STATION_INFO[s].col; g.fillText(TIPS[s], W / 2, 180);
+}
+
+function drawPause(){
+  g.fillStyle = 'rgba(3,4,12,0.7)'; g.fillRect(0, 0, W, H);
+  g.textAlign = 'center'; g.fillStyle = '#fff'; g.font = 'bold 110px system-ui';
+  g.fillText('PAUSED', W / 2, H / 2);
+  g.font = '28px system-ui'; g.fillStyle = '#9fb0c3';
+  g.fillText('Tap RESUME on a phone, or press P', W / 2, H / 2 + 60);
 }
 
 function drawCount(){
@@ -878,15 +1107,19 @@ function drawResults(){
     ['gunner', 'destroyed ' + st.kills + ' thing' + (st.kills === 1 ? '' : 's')],
     ['thrusters', 'fired the boosters ' + st.boosts + ' time' + (st.boosts === 1 ? '' : 's')]
   ];
+  if(st.bosses) lines[2][1] += ' and ' + st.bosses + ' mothership' + (st.bosses === 1 ? '' : 's');
   lines.forEach(([s, txt], i) => {
     const info = STATION_INFO[s], who = L.crew[s] || 'The computer', y = 500 + i * 56;
+    if(L.mvp === s){ g.textAlign = 'left'; g.fillStyle = '#ffd54f'; g.font = 'bold 22px system-ui'; g.fillText('★ SAVED THE SHIP', W / 2 + 470, y - 4); }
     g.textAlign = 'right'; g.fillStyle = info.col; g.font = 'bold 30px system-ui';
     g.fillText(info.name.toUpperCase(), W / 2 - 30, y);
     g.textAlign = 'left'; g.fillStyle = '#fff'; g.font = '30px system-ui';
     g.fillText(who + ' ' + txt, W / 2 - 10, y);
   });
-  g.textAlign = 'center'; g.fillStyle = '#9fb0c3'; g.font = '24px system-ui';
-  g.fillText('Tap CONTINUE on a phone, or press Enter, to go to the hangar', W / 2, 800);
+  g.textAlign = 'center';
+  if(L.newPaints && L.newPaints.length){ g.fillStyle = '#69f0ae'; g.font = 'bold 28px system-ui'; g.fillText('New paint job unlocked: ' + L.newPaints.join(', ') + '!', W / 2, 760); }
+  g.fillStyle = '#9fb0c3'; g.font = '24px system-ui';
+  g.fillText('Tap CONTINUE on a phone, or press Enter, to go to the hangar', W / 2, 810);
 }
 
 /* ---------- the hangar: lobby and shop on one screen ---------- */
@@ -934,6 +1167,11 @@ function drawHangar(){
   const mx = W / 2;
   g.fillStyle = 'rgba(255,255,255,0.04)'; g.beginPath(); g.arc(mx, 330, 150, 0, 6.283); g.fill();
   drawShip(mx, 340, SAVE.lv, null, 2.2);
+  g.textAlign = 'center'; g.font = '17px system-ui'; g.fillStyle = '#9fb0c3';
+  const paintsHave = MC.PAINTS.filter(unlocked).length;
+  g.fillText(paintOf(SAVE.paint).name + ' paint (' + paintsHave + '/' + MC.PAINTS.length + ' unlocked)' +
+             (SAVE.bosses ? '  ·  ' + SAVE.bosses + ' mothership' + (SAVE.bosses === 1 ? '' : 's') + ' destroyed' : '') +
+             (SAVE.planets.length ? '  ·  ' + SAVE.planets.length + ' planet' + (SAVE.planets.length === 1 ? '' : 's') + ' visited' : ''), mx, 518);
   STATIONS.forEach((s, i) => {
     const info = STATION_INFO[s], p = G.crew[s] && NET.people[G.crew[s]];
     const x = mx - 300 + (i % 2) * 310, y = 540 + Math.floor(i / 2) * 104;
@@ -964,7 +1202,7 @@ function drawHangar(){
     g.textAlign = 'left'; g.font = '15px system-ui'; g.fillStyle = '#8899aa'; g.fillText(u.blurb, rx + 14, y + 60);
   });
   g.textAlign = 'left'; g.font = '17px system-ui'; g.fillStyle = '#9fb0c3';
-  g.fillText('Buy upgrades from any phone.', rx, ry + 500);
+  g.fillText('Buy upgrades and pick the paint from any phone.', rx, ry + 500);
 
   // bottom: how to go
   const here = present();
